@@ -78,3 +78,42 @@ jobs:
           tags: ${{ steps.image.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Send deploy request to LMS
+        env:
+          LMS_API_KEY: ${{ secrets.LMS_API_KEY }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          REPOSITORY: ${{ github.repository }}
+
+        run: |
+          if [ -z "$LMS_API_KEY" ]; then
+            echo "LMS_API_KEY secret is not configured"
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl --silent --show-error \
+            --output response.txt \
+            --write-out "%{http_code}" \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "X-API-Key: $LMS_API_KEY" \
+            --data "{\"image\":\"$IMAGE\",\"repository\":\"$REPOSITORY\"}" \
+            "https://lms.python-labs.ru/api/deploy-requests")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "LMS deploy request failed: HTTP $HTTP_CODE"
+            cat response.txt
+            exit 1
+          fi
+
+          echo "LMS deployment request accepted"
