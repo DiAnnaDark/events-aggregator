@@ -8,8 +8,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    postgres_db: str
-    postgres_user: str
+    postgres_database_name: str
+    postgres_username: str
     postgres_password: SecretStr
     postgres_host: str
     postgres_port: int

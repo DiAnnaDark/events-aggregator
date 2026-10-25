@@ -10,8 +10,8 @@ from app.infrastructure.db.session import create_db_engine, create_session_facto
 def test_engine_and_session_factory() -> None:
     settings = Settings(
         _env_file=None,
-        postgres_db="test_events",
-        postgres_user="test_user",
+        postgres_database_name="test_events",
+        postgres_username="test_user",
         postgres_password=SecretStr("test@password"),
         postgres_host="127.0.0.1",
         postgres_port=6543,

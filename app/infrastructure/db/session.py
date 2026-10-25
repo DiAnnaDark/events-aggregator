@@ -12,11 +12,11 @@ from app.core.config import Settings
 def create_db_engine(settings: Settings) -> AsyncEngine:
     url = URL.create(
         "postgresql+asyncpg",
-        username=settings.postgres_user,
+        username=settings.postgres_username,
         password=settings.postgres_password.get_secret_value(),
         host=settings.postgres_host,
         port=settings.postgres_port,
-        database=settings.postgres_db,
+        database=settings.postgres_database_name,
     )
 
     return create_async_engine(url, pool_pre_ping=True)
