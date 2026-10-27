@@ -80,9 +80,11 @@ def test_lifespan_creates_and_closes_resources() -> None:
             assert response.status_code == 200
             assert response.json() == {"status": "started"}
             assert hasattr(application.state, "sync_runner")
+            assert hasattr(application.state, "seats_service")
 
         assert not hasattr(application.state, "sync_runner")
         assert not hasattr(application.state, "db_session_factory")
+        assert not hasattr(application.state, "seats_service")
 
     scheduler_class.assert_called_once_with(
         runner=runner,

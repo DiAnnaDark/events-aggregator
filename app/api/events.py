@@ -3,10 +3,16 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.application.events.schemas import EventDetail, EventPage
+from app.application.events.schemas import (
+    EventDetail,
+    EventPage,
+    EventSeats,
+)
+from app.application.events.seats_service import SeatsService
 from app.infrastructure.db.event_read_repository import (
     PostgresEventReadRepository,
 )
@@ -36,6 +42,28 @@ async def get_event_read_repository(
 EventReadDependency = Annotated[
     PostgresEventReadRepository,
     Depends(get_event_read_repository),
+]
+
+
+def get_seats_service(request: Request) -> SeatsService:
+    service = getattr(
+        request.app.state,
+        "seats_service",
+        None,
+    )
+
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Events Provider is unavailable",
+        )
+
+    return service
+
+
+SeatsServiceDependency = Annotated[
+    SeatsService,
+    Depends(get_seats_service),
 ]
 
 
@@ -86,3 +114,59 @@ async def get_event(
         )
 
     return event
+
+
+@router.get(
+    "/events/{event_id}/seats",
+    response_model=EventSeats,
+)
+async def get_event_seats(
+    event_id: UUID,
+    repository: EventReadDependency,
+    seats_service: SeatsServiceDependency,
+) -> EventSeats:
+    event = await repository.get_event(event_id)
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found",
+        )
+
+    if event.status != "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Event is not published",
+        )
+
+    try:
+        seats = await seats_service.get_available_seats(event_id)
+
+    except httpx.TimeoutException as error:
+        raise HTTPException(
+            status_code=504,
+            detail="Events Provider timeout",
+        ) from error
+
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="Event not found in Events Provider",
+            ) from error
+
+        raise HTTPException(
+            status_code=502,
+            detail="Events Provider returned an error",
+        ) from error
+
+    except (httpx.RequestError, ValueError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Events Provider is unavailable",
+        ) from error
+
+    return EventSeats(
+        event_id=event_id,
+        available_seats=seats,
+    )

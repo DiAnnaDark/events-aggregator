@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -52,3 +53,27 @@ class EventsProviderClient:
             raise ValueError("Invalid Events Provider response")
 
         return page
+
+    async def seats(
+        self,
+        *,
+        event_id: UUID,
+    ) -> list[str]:
+        response = await self._client.get(
+            f"{self._base_url}/api/events/{event_id}/seats/",
+            headers={"x-api-key": self._api_key},
+            timeout=self._timeout,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("seats"), list)
+            or not all(isinstance(seat, str) for seat in data["seats"])
+        ):
+            raise ValueError("Invalid Events Provider seats response")
+
+        return data["seats"]

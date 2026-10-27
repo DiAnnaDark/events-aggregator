@@ -33,3 +33,8 @@ class EventPage(BaseModel):
     next: str | None
     previous: str | None
     results: list[EventSummary]
+
+
+class EventSeats(BaseModel):
+    event_id: UUID
+    available_seats: list[str]
