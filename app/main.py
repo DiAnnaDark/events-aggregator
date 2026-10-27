@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from app.api.events import router as events_router
 from app.api.health import router as health_router
 from app.api.sync import router as sync_router
 from app.application.sync.runner import SyncRunner
@@ -26,22 +27,22 @@ async def sync_lifespan(
     application: FastAPI,
 ) -> AsyncIterator[None]:
     settings = Settings()
-
-    secret = settings.events_provider_api_key
-
-    api_key = secret.get_secret_value() if secret is not None else ""
-
-    if not api_key:
-        logger.warning(
-            "Events Provider API key is not configured; synchronization is unavailable"
-        )
-
-        yield
-        return
-
     engine = create_db_engine(settings)
 
     try:
+        session_factory = create_session_factory(engine)
+        application.state.db_session_factory = session_factory
+
+        secret = settings.events_provider_api_key
+        api_key = secret.get_secret_value() if secret is not None else ""
+
+        if not api_key:
+            logger.warning(
+                "Events Provider API key is not configured; synchronization is unavailable"
+            )
+            yield
+            return
+
         async with httpx.AsyncClient() as http_client:
             provider = EventsProviderClient(
                 base_url=settings.events_provider_base_url,
@@ -50,8 +51,7 @@ async def sync_lifespan(
             )
 
             source = ProviderEventsSource(provider)
-
-            store = PostgresSyncStore(create_session_factory(engine))
+            store = PostgresSyncStore(session_factory)
 
             service = SyncService(
                 source=source,
@@ -59,7 +59,6 @@ async def sync_lifespan(
             )
 
             runner = SyncRunner(service)
-
             application.state.sync_runner = runner
 
             try:
@@ -69,6 +68,9 @@ async def sync_lifespan(
                 del application.state.sync_runner
 
     finally:
+        if hasattr(application.state, "db_session_factory"):
+            del application.state.db_session_factory
+
         await engine.dispose()
 
 
@@ -83,6 +85,7 @@ def create_app(
 
     application.include_router(health_router)
     application.include_router(sync_router)
+    application.include_router(events_router)
 
     return application
 

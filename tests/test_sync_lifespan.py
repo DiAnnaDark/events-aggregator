@@ -10,8 +10,13 @@ def test_missing_provider_key_keeps_health_available() -> None:
     settings = MagicMock()
     settings.events_provider_api_key = None
 
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+
     with (
         patch("app.main.Settings", return_value=settings),
+        patch("app.main.create_db_engine", return_value=engine),
+        patch("app.main.create_session_factory"),
         TestClient(create_app()) as client,
     ):
         health = client.get("/api/health")
@@ -19,6 +24,8 @@ def test_missing_provider_key_keeps_health_available() -> None:
 
     assert health.status_code == 200
     assert trigger.status_code == 503
+
+    engine.dispose.assert_awaited_once()
 
 
 def test_lifespan_creates_and_closes_resources() -> None:
