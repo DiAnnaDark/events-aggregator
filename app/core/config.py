@@ -13,3 +13,6 @@ class Settings(BaseSettings):
     postgres_password: SecretStr
     postgres_host: str
     postgres_port: int
+
+    events_provider_base_url: str = "http://events-provider.dev-2.python-labs.ru"
+    events_provider_api_key: SecretStr | None = None
