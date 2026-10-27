@@ -207,3 +207,19 @@ class PostgresTicketStore:
                 operation_id=operation_id,
                 now=now,
             )
+
+    async def expire_stale_prepared_operations(
+        self,
+        *,
+        stale_before: datetime,
+        now: datetime,
+        limit: int = 100,
+    ) -> int:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.expire_stale_prepared_operations(
+                stale_before=stale_before,
+                now=now,
+                limit=limit,
+            )

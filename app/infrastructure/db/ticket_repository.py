@@ -522,3 +522,85 @@ class PostgresTicketRepository:
         result = await self._session.execute(statement)
 
         return result.scalar_one_or_none() is not None
+
+    async def expire_prepared_cancellation(
+        self,
+        *,
+        operation_id: UUID,
+        stale_before: datetime,
+        now: datetime,
+    ) -> bool:
+        statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.operation_type == "cancel",
+                TicketOperation.status == "prepared",
+                TicketOperation.updated_at < stale_before,
+            )
+            .values(
+                status="failed",
+                error_code="stale_prepared",
+                updated_at=now,
+                finished_at=now,
+            )
+            .returning(TicketOperation.id)
+        )
+
+        result = await self._session.execute(statement)
+
+        return result.scalar_one_or_none() is not None
+
+    async def expire_stale_prepared_operations(
+        self,
+        *,
+        stale_before: datetime,
+        now: datetime,
+        limit: int = 100,
+    ) -> int:
+        if not 1 <= limit <= 500:
+            raise ValueError("Cleanup limit must be between 1 and 500")
+
+        statement = (
+            select(
+                TicketOperation.id,
+                TicketOperation.operation_type,
+            )
+            .where(
+                TicketOperation.status == "prepared",
+                TicketOperation.updated_at < stale_before,
+                TicketOperation.operation_type.in_(("register", "cancel")),
+            )
+            .order_by(
+                TicketOperation.updated_at,
+                TicketOperation.id,
+            )
+            .limit(limit)
+            .with_for_update(
+                of=TicketOperation,
+                skip_locked=True,
+            )
+        )
+
+        result = await self._session.execute(statement)
+
+        expired = 0
+
+        for operation_id, operation_type in result.all():
+            if operation_type == "register":
+                completed = await self.expire_prepared_registration(
+                    operation_id=operation_id,
+                    stale_before=stale_before,
+                    now=now,
+                )
+            else:
+                completed = await self.expire_prepared_cancellation(
+                    operation_id=operation_id,
+                    stale_before=stale_before,
+                    now=now,
+                )
+
+            if completed:
+                expired += 1
+
+        return expired

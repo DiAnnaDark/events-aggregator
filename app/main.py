@@ -13,12 +13,14 @@ from app.application.events.seats_service import SeatsService
 from app.application.sync.runner import SyncRunner
 from app.application.sync.scheduler import DailySyncScheduler
 from app.application.sync.service import SyncService
+from app.application.tickets.recovery_scheduler import TicketRecoveryScheduler
 from app.core.config import Settings
 from app.infrastructure.db.session import (
     create_db_engine,
     create_session_factory,
 )
 from app.infrastructure.db.sync_store import PostgresSyncStore
+from app.infrastructure.db.ticket_store import PostgresTicketStore
 from app.infrastructure.provider.client import EventsProviderClient
 from app.infrastructure.provider.source import ProviderEventsSource
 
@@ -68,14 +70,20 @@ async def sync_lifespan(
                 history=store,
             )
 
+            recovery_scheduler = TicketRecoveryScheduler(
+                store=PostgresTicketStore(session_factory),
+            )
+
             application.state.sync_runner = runner
             application.state.seats_service = SeatsService(provider)
             application.state.registration_provider = provider
 
             try:
                 scheduler.start()
+                recovery_scheduler.start()
                 yield
             finally:
+                await recovery_scheduler.stop()
                 await scheduler.stop()
                 await runner.stop()
                 del application.state.sync_runner

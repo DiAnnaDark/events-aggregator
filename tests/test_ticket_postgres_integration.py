@@ -1278,3 +1278,204 @@ def test_http_cancellation_with_real_postgres() -> None:
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_cleanup_releases_stale_prepared_registration() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            reserved, ticket_id, operation_id = await try_reserve(
+                store,
+                event_id=event_id,
+            )
+            assert reserved is True
+
+            now = datetime.now(UTC)
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(updated_at=now - timedelta(days=365))
+                )
+
+            expired = await store.expire_stale_prepared_operations(
+                stale_before=now - timedelta(minutes=30),
+                now=now,
+                limit=1,
+            )
+
+            assert expired == 1
+
+            async with factory() as session:
+                ticket = await session.get(Ticket, ticket_id)
+                operation = await session.get(
+                    TicketOperation,
+                    operation_id,
+                )
+
+                assert ticket.status == "failed"
+                assert operation.status == "failed"
+                assert operation.error_code == "stale_prepared"
+
+            reserved_again, _, _ = await try_reserve(
+                store,
+                event_id=event_id,
+            )
+            assert reserved_again is True
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_closes_stale_prepared_cancellation() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            ticket_id = await create_active_ticket(store, event_id)
+            operation_id = uuid4()
+            now = datetime.now(UTC)
+
+            assert await store.prepare_cancellation(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                request_fingerprint="cleanup-test",
+                now=now,
+            )
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(updated_at=now - timedelta(days=365))
+                )
+
+            expired = await store.expire_stale_prepared_operations(
+                stale_before=now - timedelta(minutes=30),
+                now=now,
+                limit=1,
+            )
+
+            assert expired == 1
+
+            async with factory() as session:
+                ticket = await session.get(Ticket, ticket_id)
+                operation = await session.get(
+                    TicketOperation,
+                    operation_id,
+                )
+
+                assert ticket.status == "active"
+                assert operation.status == "failed"
+                assert operation.error_code == "stale_prepared"
+
+            assert await store.prepare_cancellation(
+                ticket_id=ticket_id,
+                operation_id=uuid4(),
+                request_fingerprint="second-attempt",
+                now=datetime.now(UTC),
+            )
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_does_not_touch_in_flight() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+
+            ticket_id, operation_id = await create_started_cancellation_for_errors(
+                store,
+                event_id,
+            )
+
+            now = datetime.now(UTC)
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(updated_at=now - timedelta(days=365))
+                )
+
+            await store.expire_stale_prepared_operations(
+                stale_before=now - timedelta(minutes=30),
+                now=now,
+            )
+
+            async with factory() as session:
+                ticket = await session.get(Ticket, ticket_id)
+                operation = await session.get(
+                    TicketOperation,
+                    operation_id,
+                )
+
+                assert ticket.status == "active"
+                assert operation.status == "in_flight"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_does_not_touch_unknown() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+
+            ticket_id, operation_id = await create_started_cancellation_for_errors(
+                store,
+                event_id,
+            )
+
+            now = datetime.now(UTC)
+
+            assert await store.record_cancellation_error(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                outcome="unknown",
+                provider_http_status=500,
+                error_code="provider_error",
+                now=now,
+            )
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(updated_at=now - timedelta(days=365))
+                )
+
+            await store.expire_stale_prepared_operations(
+                stale_before=now - timedelta(minutes=30),
+                now=now,
+            )
+
+            async with factory() as session:
+                ticket = await session.get(Ticket, ticket_id)
+                operation = await session.get(
+                    TicketOperation,
+                    operation_id,
+                )
+
+                assert ticket.status == "active"
+                assert operation.status == "unknown"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

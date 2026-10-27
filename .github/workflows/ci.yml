@@ -11,6 +11,21 @@ jobs:
   quality:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: events_aggregator_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: events_test_only
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d events_aggregator_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,6 +48,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Run tests
+        env:
+          EVENTS_AGGREGATOR_TEST_DATABASE_URL: postgresql+asyncpg://postgres:events_test_only@127.0.0.1:55433/events_aggregator_test
         run: uv run python -m pytest -q
 
   build:
