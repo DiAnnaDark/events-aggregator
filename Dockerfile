@@ -13,9 +13,12 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project --no-cache
 
 COPY app/ ./app/
+COPY migrations/ ./migrations/
+COPY alembic.ini ./
+COPY run.sh ./
 
 USER 10001:10001
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "./run.sh"]
