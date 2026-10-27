@@ -96,3 +96,24 @@ def test_success_preserves_watermark_when_no_events() -> None:
     assert "sync_state.started_at =" in sql
 
     session.commit.assert_not_awaited()
+
+
+def test_get_last_successful_sync_reads_timestamp() -> None:
+    now = datetime(2026, 10, 27, 18, tzinfo=UTC)
+
+    session = AsyncMock(spec=AsyncSession)
+    session.scalar.return_value = now
+
+    repository = PostgresSyncStateRepository(session)
+
+    result = asyncio.run(repository.get_last_successful_sync())
+
+    assert result == now
+
+    statement = session.scalar.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "SELECT sync_state.last_sync_time" in sql
+    assert "WHERE sync_state.id =" in sql
+
+    session.commit.assert_not_awaited()

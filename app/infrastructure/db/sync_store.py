@@ -93,3 +93,9 @@ class PostgresSyncStore:
                 now=now,
                 error=error,
             )
+
+    async def get_last_successful_sync(self) -> datetime | None:
+        async with self._session_factory() as session:
+            repository = PostgresSyncStateRepository(session)
+
+            return await repository.get_last_successful_sync()

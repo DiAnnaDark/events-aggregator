@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import case, or_, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.sync.state import SyncLease
@@ -137,3 +137,8 @@ class PostgresSyncStateRepository:
 
         result = await self._session.execute(statement)
         return result.scalar_one_or_none() is not None
+
+    async def get_last_successful_sync(self) -> datetime | None:
+        statement = select(SyncState.last_sync_time).where(SyncState.id == 1)
+
+        return await self._session.scalar(statement)

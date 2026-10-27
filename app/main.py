@@ -9,6 +9,7 @@ from app.api.events import router as events_router
 from app.api.health import router as health_router
 from app.api.sync import router as sync_router
 from app.application.sync.runner import SyncRunner
+from app.application.sync.scheduler import DailySyncScheduler
 from app.application.sync.service import SyncService
 from app.core.config import Settings
 from app.infrastructure.db.session import (
@@ -59,11 +60,19 @@ async def sync_lifespan(
             )
 
             runner = SyncRunner(service)
+
+            scheduler = DailySyncScheduler(
+                runner=runner,
+                history=store,
+            )
+
             application.state.sync_runner = runner
 
             try:
+                scheduler.start()
                 yield
             finally:
+                await scheduler.stop()
                 await runner.stop()
                 del application.state.sync_runner
 

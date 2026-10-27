@@ -131,3 +131,30 @@ def test_database_error_propagates() -> None:
     exit_args = factory.begin.return_value.__aexit__.await_args.args
 
     assert exit_args[0] is RuntimeError
+
+
+def test_get_last_successful_sync_uses_read_session() -> None:
+    factory = MagicMock()
+
+    session = MagicMock()
+    factory.return_value.__aenter__.return_value = session
+
+    state_repository = MagicMock()
+    state_repository.get_last_successful_sync = AsyncMock(return_value=NOW)
+
+    with patch(
+        "app.infrastructure.db.sync_store.PostgresSyncStateRepository",
+        return_value=state_repository,
+    ):
+        store = PostgresSyncStore(factory)
+
+        result = asyncio.run(store.get_last_successful_sync())
+
+    assert result == NOW
+
+    factory.assert_called_once_with()
+    factory.begin.assert_not_called()
+
+    state_repository.get_last_successful_sync.assert_awaited_once()
+
+    factory.return_value.__aexit__.assert_awaited_once()

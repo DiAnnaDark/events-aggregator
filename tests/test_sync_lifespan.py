@@ -17,6 +17,7 @@ def test_missing_provider_key_keeps_health_available() -> None:
         patch("app.main.Settings", return_value=settings),
         patch("app.main.create_db_engine", return_value=engine),
         patch("app.main.create_session_factory"),
+        patch("app.main.DailySyncScheduler") as scheduler_class,
         TestClient(create_app()) as client,
     ):
         health = client.get("/api/health")
@@ -25,6 +26,7 @@ def test_missing_provider_key_keeps_health_available() -> None:
     assert health.status_code == 200
     assert trigger.status_code == 503
 
+    scheduler_class.assert_not_called()
     engine.dispose.assert_awaited_once()
 
 
@@ -40,9 +42,20 @@ def test_lifespan_creates_and_closes_resources() -> None:
     http_context.__aenter__ = AsyncMock(return_value=MagicMock())
     http_context.__aexit__ = AsyncMock(return_value=False)
 
+    shutdown_order = []
+
+    async def stop_scheduler() -> None:
+        shutdown_order.append("scheduler")
+
+    async def stop_runner() -> None:
+        shutdown_order.append("runner")
+
     runner = MagicMock()
     runner.trigger.return_value = True
-    runner.stop = AsyncMock()
+    runner.stop = AsyncMock(side_effect=stop_runner)
+
+    scheduler = MagicMock()
+    scheduler.stop = AsyncMock(side_effect=stop_scheduler)
 
     with (
         patch("app.main.Settings", return_value=settings),
@@ -51,9 +64,13 @@ def test_lifespan_creates_and_closes_resources() -> None:
         patch("app.main.httpx.AsyncClient", return_value=http_context),
         patch("app.main.EventsProviderClient"),
         patch("app.main.ProviderEventsSource"),
-        patch("app.main.PostgresSyncStore"),
+        patch("app.main.PostgresSyncStore") as store_class,
         patch("app.main.SyncService"),
         patch("app.main.SyncRunner", return_value=runner),
+        patch(
+            "app.main.DailySyncScheduler",
+            return_value=scheduler,
+        ) as scheduler_class,
     ):
         application = create_app()
 
@@ -62,9 +79,22 @@ def test_lifespan_creates_and_closes_resources() -> None:
 
             assert response.status_code == 200
             assert response.json() == {"status": "started"}
+            assert hasattr(application.state, "sync_runner")
 
         assert not hasattr(application.state, "sync_runner")
+        assert not hasattr(application.state, "db_session_factory")
+
+    scheduler_class.assert_called_once_with(
+        runner=runner,
+        history=store_class.return_value,
+    )
+
+    scheduler.start.assert_called_once()
+    scheduler.stop.assert_awaited_once()
 
     runner.trigger.assert_called_once()
     runner.stop.assert_awaited_once()
+
+    assert shutdown_order == ["scheduler", "runner"]
+
     engine.dispose.assert_awaited_once()
