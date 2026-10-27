@@ -311,3 +311,214 @@ class PostgresTicketRepository:
             return None
 
         return TicketCancellationSnapshot(**data)
+
+    async def prepare_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> bool:
+        ticket_statement = (
+            select(Ticket.id)
+            .join(Event, Event.id == Ticket.event_id)
+            .where(
+                Ticket.id == ticket_id,
+                Ticket.status == "active",
+                Ticket.provider_ticket_id.is_not(None),
+                Event.event_time > now,
+            )
+            .with_for_update(of=Ticket)
+        )
+
+        ticket_result = await self._session.execute(ticket_statement)
+
+        if ticket_result.scalar_one_or_none() is None:
+            return False
+
+        operation_statement = (
+            insert(TicketOperation)
+            .values(
+                id=operation_id,
+                registration_id=ticket_id,
+                operation_type="cancel",
+                idempotency_key=None,
+                request_fingerprint=request_fingerprint,
+                status="prepared",
+                provider_http_status=None,
+                error_code=None,
+                created_at=now,
+                updated_at=now,
+                finished_at=None,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    TicketOperation.registration_id,
+                ],
+                index_where=text("status IN ('prepared', 'in_flight', 'unknown')"),
+            )
+            .returning(TicketOperation.id)
+        )
+
+        operation_result = await self._session.execute(operation_statement)
+
+        return operation_result.scalar_one_or_none() is not None
+
+    async def mark_cancellation_in_flight(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        active_ticket = (
+            select(Ticket.id)
+            .join(Event, Event.id == Ticket.event_id)
+            .where(
+                Ticket.id == ticket_id,
+                Ticket.status == "active",
+                Ticket.provider_ticket_id.is_not(None),
+                Event.event_time > now,
+            )
+            .exists()
+        )
+
+        statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.registration_id == ticket_id,
+                TicketOperation.operation_type == "cancel",
+                TicketOperation.status == "prepared",
+                active_ticket,
+            )
+            .values(
+                status="in_flight",
+                updated_at=now,
+            )
+            .returning(TicketOperation.id)
+        )
+
+        result = await self._session.execute(statement)
+
+        return result.scalar_one_or_none() is not None
+
+    async def finish_cancellation_success(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        operation_statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.registration_id == ticket_id,
+                TicketOperation.operation_type == "cancel",
+                TicketOperation.status == "in_flight",
+            )
+            .values(
+                status="success",
+                provider_http_status=200,
+                error_code=None,
+                updated_at=now,
+                finished_at=now,
+            )
+            .returning(TicketOperation.id)
+        )
+
+        operation_result = await self._session.execute(operation_statement)
+
+        if operation_result.scalar_one_or_none() is None:
+            return False
+
+        ticket_statement = (
+            update(Ticket)
+            .where(
+                Ticket.id == ticket_id,
+                Ticket.status == "active",
+                Ticket.provider_ticket_id.is_not(None),
+            )
+            .values(
+                status="cancelled",
+                cancelled_at=now,
+                updated_at=now,
+            )
+            .returning(Ticket.id)
+        )
+
+        ticket_result = await self._session.execute(ticket_statement)
+
+        if ticket_result.scalar_one_or_none() is None:
+            raise TicketStateConflict(
+                "Ticket state changed during cancellation confirmation"
+            )
+
+        return True
+
+    async def record_cancellation_error(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        outcome: Literal["failed", "unknown"],
+        provider_http_status: int | None,
+        error_code: str,
+        now: datetime,
+    ) -> bool:
+        if outcome not in ("failed", "unknown"):
+            raise ValueError("Unsupported cancellation outcome")
+
+        finished_at = now if outcome == "failed" else None
+
+        statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.registration_id == ticket_id,
+                TicketOperation.operation_type == "cancel",
+                TicketOperation.status == "in_flight",
+            )
+            .values(
+                status=outcome,
+                provider_http_status=provider_http_status,
+                error_code=error_code,
+                updated_at=now,
+                finished_at=finished_at,
+            )
+            .returning(TicketOperation.id)
+        )
+
+        result = await self._session.execute(statement)
+
+        return result.scalar_one_or_none() is not None
+
+    async def abort_prepared_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.registration_id == ticket_id,
+                TicketOperation.operation_type == "cancel",
+                TicketOperation.status == "prepared",
+            )
+            .values(
+                status="failed",
+                error_code="cancellation_not_started",
+                updated_at=now,
+                finished_at=now,
+            )
+            .returning(TicketOperation.id)
+        )
+
+        result = await self._session.execute(statement)
+
+        return result.scalar_one_or_none() is not None

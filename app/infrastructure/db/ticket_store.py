@@ -119,3 +119,91 @@ class PostgresTicketStore:
             return await repository.get_ticket_for_cancellation(
                 ticket_id=ticket_id,
             )
+
+    async def prepare_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        request_fingerprint: str,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.prepare_cancellation(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                request_fingerprint=request_fingerprint,
+                now=now,
+            )
+
+    async def mark_cancellation_in_flight(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.mark_cancellation_in_flight(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                now=now,
+            )
+
+    async def finish_cancellation_success(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.finish_cancellation_success(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                now=now,
+            )
+
+    async def record_cancellation_error(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        outcome: Literal["failed", "unknown"],
+        provider_http_status: int | None,
+        error_code: str,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.record_cancellation_error(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                outcome=outcome,
+                provider_http_status=provider_http_status,
+                error_code=error_code,
+                now=now,
+            )
+
+    async def abort_prepared_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+        operation_id: UUID,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.abort_prepared_cancellation(
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                now=now,
+            )
