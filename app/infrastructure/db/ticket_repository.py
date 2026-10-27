@@ -7,7 +7,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.tickets.schemas import TicketCreate
-from app.infrastructure.db.models import Ticket, TicketOperation
+from app.application.tickets.state import TicketCancellationSnapshot
+from app.infrastructure.db.models import Event, Ticket, TicketOperation
 
 
 class TicketStateConflict(RuntimeError):
@@ -228,3 +229,85 @@ class PostgresTicketRepository:
             )
 
         return True
+
+    async def expire_prepared_registration(
+        self,
+        *,
+        operation_id: UUID,
+        stale_before: datetime,
+        now: datetime,
+    ) -> bool:
+        operation_statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.id == operation_id,
+                TicketOperation.operation_type == "register",
+                TicketOperation.status == "prepared",
+                TicketOperation.updated_at < stale_before,
+            )
+            .values(
+                status="failed",
+                error_code="stale_prepared",
+                updated_at=now,
+                finished_at=now,
+            )
+            .returning(TicketOperation.registration_id)
+        )
+
+        operation_result = await self._session.execute(operation_statement)
+
+        registration_id = operation_result.scalar_one_or_none()
+
+        if registration_id is None:
+            return False
+
+        ticket_statement = (
+            update(Ticket)
+            .where(
+                Ticket.id == registration_id,
+                Ticket.status == "pending",
+            )
+            .values(
+                status="failed",
+                updated_at=now,
+            )
+            .returning(Ticket.id)
+        )
+
+        ticket_result = await self._session.execute(ticket_statement)
+
+        if ticket_result.scalar_one_or_none() is None:
+            raise TicketStateConflict(
+                "Ticket state changed during stale reservation cleanup"
+            )
+
+        return True
+
+    async def get_ticket_for_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+    ) -> TicketCancellationSnapshot | None:
+        statement = (
+            select(
+                Ticket.id.label("ticket_id"),
+                Ticket.event_id,
+                Ticket.provider_ticket_id,
+                Ticket.status,
+                Event.event_time,
+            )
+            .join(
+                Event,
+                Event.id == Ticket.event_id,
+            )
+            .where(Ticket.id == ticket_id)
+        )
+
+        result = await self._session.execute(statement)
+
+        data = result.mappings().one_or_none()
+
+        if data is None:
+            return None
+
+        return TicketCancellationSnapshot(**data)

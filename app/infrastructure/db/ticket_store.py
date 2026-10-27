@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.tickets.schemas import TicketCreate
+from app.application.tickets.state import TicketCancellationSnapshot
 from app.infrastructure.db.ticket_repository import PostgresTicketRepository
 
 
@@ -89,4 +90,32 @@ class PostgresTicketStore:
                 provider_http_status=provider_http_status,
                 error_code=error_code,
                 now=now,
+            )
+
+    async def expire_prepared_registration(
+        self,
+        *,
+        operation_id: UUID,
+        stale_before: datetime,
+        now: datetime,
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.expire_prepared_registration(
+                operation_id=operation_id,
+                stale_before=stale_before,
+                now=now,
+            )
+
+    async def get_ticket_for_cancellation(
+        self,
+        *,
+        ticket_id: UUID,
+    ) -> TicketCancellationSnapshot | None:
+        async with self._session_factory() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.get_ticket_for_cancellation(
+                ticket_id=ticket_id,
             )

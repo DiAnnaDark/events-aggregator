@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.api.events import router as events_router
 from app.api.health import router as health_router
 from app.api.sync import router as sync_router
+from app.api.tickets import router as tickets_router
 from app.application.events.seats_service import SeatsService
 from app.application.sync.runner import SyncRunner
 from app.application.sync.scheduler import DailySyncScheduler
@@ -69,6 +70,7 @@ async def sync_lifespan(
 
             application.state.sync_runner = runner
             application.state.seats_service = SeatsService(provider)
+            application.state.registration_provider = provider
 
             try:
                 scheduler.start()
@@ -82,6 +84,8 @@ async def sync_lifespan(
     finally:
         if hasattr(application.state, "db_session_factory"):
             del application.state.db_session_factory
+            if hasattr(application.state, "registration_provider"):
+                del application.state.registration_provider
 
         await engine.dispose()
 
@@ -98,6 +102,7 @@ def create_app(
     application.include_router(health_router)
     application.include_router(sync_router)
     application.include_router(events_router)
+    application.include_router(tickets_router)
 
     return application
 
