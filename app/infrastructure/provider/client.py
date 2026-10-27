@@ -77,3 +77,59 @@ class EventsProviderClient:
             raise ValueError("Invalid Events Provider seats response")
 
         return data["seats"]
+
+    async def register(
+        self,
+        *,
+        event_id: UUID,
+        first_name: str,
+        last_name: str,
+        email: str,
+        seat: str,
+    ) -> UUID:
+        response = await self._client.post(
+            f"{self._base_url}/api/events/{event_id}/register/",
+            json={
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+                "seat": seat,
+            },
+            headers={"x-api-key": self._api_key},
+            timeout=self._timeout,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        ticket_id = data.get("ticket_id") if isinstance(data, dict) else None
+
+        if not isinstance(ticket_id, str):
+            raise TypeError("Invalid Events Provider registration response")
+
+        try:
+            return UUID(ticket_id)
+        except ValueError as error:
+            raise ValueError("Invalid Events Provider registration response") from error
+
+    async def unregister(
+        self,
+        *,
+        event_id: UUID,
+        ticket_id: UUID,
+    ) -> None:
+        response = await self._client.request(
+            "DELETE",
+            f"{self._base_url}/api/events/{event_id}/unregister/",
+            json={"ticket_id": str(ticket_id)},
+            headers={"x-api-key": self._api_key},
+            timeout=self._timeout,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not isinstance(data, dict) or data.get("success") is not True:
+            raise ValueError("Invalid Events Provider cancellation response")
