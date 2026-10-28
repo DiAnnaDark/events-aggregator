@@ -1,10 +1,13 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 router = APIRouter(prefix="/api")
 
 
 @router.post("/sync/trigger")
-async def trigger_sync(request: Request) -> dict[str, str]:
+async def trigger_sync(
+    request: Request,
+    response: Response,
+) -> dict[str, str]:
     runner = getattr(
         request.app.state,
         "sync_runner",
@@ -18,9 +21,7 @@ async def trigger_sync(request: Request) -> dict[str, str]:
         )
 
     if not runner.trigger():
-        raise HTTPException(
-            status_code=409,
-            detail="Synchronization is already running",
-        )
+        response.status_code = 202
+        return {"status": "already_running"}
 
     return {"status": "started"}

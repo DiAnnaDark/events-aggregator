@@ -3,7 +3,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 
 from app.api.events import router as events_router
 from app.api.health import router as health_router
@@ -25,6 +27,21 @@ from app.infrastructure.provider.client import EventsProviderClient
 from app.infrastructure.provider.source import ProviderEventsSource
 
 logger = logging.getLogger(__name__)
+
+
+async def handle_validation_error(
+    request: Request,
+    error: RequestValidationError,
+) -> Response:
+    response = await request_validation_exception_handler(
+        request,
+        error,
+    )
+
+    if request.method == "POST" and request.url.path == "/api/tickets":
+        response.status_code = 400
+
+    return response
 
 
 @asynccontextmanager
@@ -105,6 +122,9 @@ def create_app(
     application = FastAPI(
         title="Events Aggregator",
         lifespan=sync_lifespan if enable_sync else None,
+        exception_handlers={
+            RequestValidationError: handle_validation_error,
+        },
     )
 
     application.include_router(health_router)

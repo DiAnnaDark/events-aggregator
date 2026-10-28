@@ -136,6 +136,30 @@ def test_invalid_ticket_data_is_rejected(
             json=body,
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 400
+
+    service.register.assert_not_awaited()
+
+
+def test_invalid_registration_matches_lms_contract() -> None:
+    service = SimpleNamespace(register=AsyncMock(return_value=uuid4()))
+
+    application = make_application(service)
+
+    body = ticket_body()
+    body["event_id"] = "not-a-uuid"
+    body["email"] = "x"
+
+    with TestClient(application) as client:
+        response = client.post(
+            "/api/tickets",
+            json=body,
+        )
+
+    assert response.status_code == 400
+
+    invalid_fields = {error["loc"][-1] for error in response.json()["detail"]}
+
+    assert {"event_id", "email"} <= invalid_fields
 
     service.register.assert_not_awaited()

@@ -22,7 +22,7 @@ def test_trigger_starts_synchronization() -> None:
     runner.trigger.assert_called_once_with()
 
 
-def test_trigger_rejects_parallel_synchronization() -> None:
+def test_trigger_acknowledges_parallel_synchronization() -> None:
     application = create_app(enable_sync=False)
 
     runner = Mock()
@@ -33,7 +33,8 @@ def test_trigger_rejects_parallel_synchronization() -> None:
     with TestClient(application) as client:
         response = client.post("/api/sync/trigger")
 
-    assert response.status_code == 409
+    assert response.status_code == 202
+    assert response.json() == {"status": "already_running"}
 
     runner.trigger.assert_called_once_with()
 
