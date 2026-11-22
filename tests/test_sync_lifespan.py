@@ -9,11 +9,17 @@ from app.main import create_app
 def test_missing_provider_key_keeps_health_available() -> None:
     settings = MagicMock()
     settings.events_provider_api_key = None
+    settings.outbox_poll_interval_seconds = 30.0
+    settings.outbox_batch_size = 100
 
     engine = MagicMock()
     engine.dispose = AsyncMock()
 
+    outbox_worker = MagicMock()
+    outbox_worker.stop = AsyncMock()
+
     with (
+        patch("app.main.OutboxWorker", return_value=outbox_worker),
         patch("app.main.Settings", return_value=settings),
         patch("app.main.create_db_engine", return_value=engine),
         patch("app.main.create_session_factory"),
@@ -23,6 +29,10 @@ def test_missing_provider_key_keeps_health_available() -> None:
     ):
         health = client.get("/api/health")
         trigger = client.post("/api/sync/trigger")
+
+        outbox_worker.start.assert_called_once_with()
+
+    outbox_worker.stop.assert_awaited_once_with()
 
     assert health.status_code == 200
     assert trigger.status_code == 503
@@ -36,6 +46,8 @@ def test_lifespan_creates_and_closes_resources() -> None:
     settings = MagicMock()
     settings.events_provider_api_key = SecretStr("test-key")
     settings.events_provider_base_url = "http://provider.invalid"
+    settings.outbox_poll_interval_seconds = 30.0
+    settings.outbox_batch_size = 100
 
     engine = MagicMock()
     engine.dispose = AsyncMock()
@@ -65,7 +77,11 @@ def test_lifespan_creates_and_closes_resources() -> None:
     recovery_scheduler = MagicMock()
     recovery_scheduler.stop = AsyncMock(side_effect=stop_recovery)
 
+    outbox_worker = MagicMock()
+    outbox_worker.stop = AsyncMock()
+
     with (
+        patch("app.main.OutboxWorker", return_value=outbox_worker),
         patch("app.main.Settings", return_value=settings),
         patch("app.main.create_db_engine", return_value=engine),
         patch("app.main.create_session_factory") as session_factory_class,
@@ -97,6 +113,10 @@ def test_lifespan_creates_and_closes_resources() -> None:
             assert hasattr(application.state, "seats_service")
             assert hasattr(application.state, "registration_provider")
             assert hasattr(application.state, "db_session_factory")
+
+            outbox_worker.start.assert_called_once_with()
+
+        outbox_worker.stop.assert_awaited_once_with()
 
         assert not hasattr(application.state, "sync_runner")
         assert not hasattr(application.state, "seats_service")
