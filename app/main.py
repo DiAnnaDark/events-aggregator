@@ -12,11 +12,13 @@ from app.api.health import router as health_router
 from app.api.sync import router as sync_router
 from app.api.tickets import router as tickets_router
 from app.application.events.seats_service import SeatsService
+from app.application.outbox.worker import OutboxWorker
 from app.application.sync.runner import SyncRunner
 from app.application.sync.scheduler import DailySyncScheduler
 from app.application.sync.service import SyncService
 from app.application.tickets.recovery_scheduler import TicketRecoveryScheduler
 from app.core.config import Settings
+from app.infrastructure.db.outbox_store import PostgresOutboxStore
 from app.infrastructure.db.session import (
     create_db_engine,
     create_session_factory,
@@ -51,9 +53,18 @@ async def sync_lifespan(
     settings = Settings()
     engine = create_db_engine(settings)
 
+    outbox_worker: OutboxWorker | None = None
+
     try:
         session_factory = create_session_factory(engine)
         application.state.db_session_factory = session_factory
+
+        outbox_worker = OutboxWorker(
+            store=PostgresOutboxStore(session_factory),
+            poll_interval_seconds=settings.outbox_poll_interval_seconds,
+            batch_size=settings.outbox_batch_size,
+        )
+        outbox_worker.start()
 
         secret = settings.events_provider_api_key
         api_key = secret.get_secret_value() if secret is not None else ""
@@ -107,6 +118,8 @@ async def sync_lifespan(
                 del application.state.seats_service
 
     finally:
+        if outbox_worker is not None:
+            await outbox_worker.stop()
         if hasattr(application.state, "db_session_factory"):
             del application.state.db_session_factory
             if hasattr(application.state, "registration_provider"):

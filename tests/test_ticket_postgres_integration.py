@@ -7,8 +7,9 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,10 +23,12 @@ from app.application.tickets.schemas import TicketCreate
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
     Event,
+    Outbox,
     Place,
     Ticket,
     TicketOperation,
 )
+from app.infrastructure.db.outbox_store import PostgresOutboxStore
 from app.infrastructure.db.ticket_repository import TicketStateConflict
 from app.infrastructure.db.ticket_store import PostgresTicketStore
 from app.main import create_app
@@ -182,6 +185,95 @@ def test_postgres_successful_registration() -> None:
                 assert ticket.status == "active"
                 assert ticket.provider_ticket_id == provider_ticket_id
                 assert operation.status == "success"
+
+                outbox_events = (
+                    await session.scalars(
+                        select(Outbox).where(
+                            Outbox.payload["ticket_id"].astext == str(registration_id)
+                        )
+                    )
+                ).all()
+
+                assert len(outbox_events) == 1
+
+                outbox_event = outbox_events[0]
+
+                assert outbox_event.event_type == "ticket_purchased"
+                assert outbox_event.status == "pending"
+                assert "Integration Test Event" in outbox_event.payload["message"]
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_outbox_failure_rolls_back_registration() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+
+            reserved, registration_id, operation_id = await try_reserve(
+                store,
+                event_id=event_id,
+            )
+
+            assert reserved is True
+
+            assert await store.mark_registration_in_flight(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                now=datetime.now(UTC),
+            )
+
+            def invalidate_outbox_status(
+                _mapper: object,
+                _connection: object,
+                target: Outbox,
+            ) -> None:
+                if target.payload["ticket_id"] == str(registration_id):
+                    target.status = "invalid"
+
+            event.listen(Outbox, "before_insert", invalidate_outbox_status)
+
+            try:
+                with pytest.raises(IntegrityError):
+                    await store.finish_registration_success(
+                        registration_id=registration_id,
+                        operation_id=operation_id,
+                        provider_ticket_id=uuid4(),
+                        now=datetime.now(UTC),
+                    )
+            finally:
+                event.remove(
+                    Outbox,
+                    "before_insert",
+                    invalidate_outbox_status,
+                )
+
+            async with factory() as session:
+                ticket = await session.get(Ticket, registration_id)
+                operation = await session.get(
+                    TicketOperation,
+                    operation_id,
+                )
+
+                assert ticket is not None
+                assert operation is not None
+
+                assert ticket.status == "pending"
+                assert ticket.provider_ticket_id is None
+                assert operation.status == "in_flight"
+
+                outbox_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Outbox)
+                    .where(Outbox.payload["ticket_id"].astext == str(registration_id))
+                )
+
+                assert outbox_count == 0
 
         finally:
             await engine.dispose()
@@ -1474,6 +1566,71 @@ def test_cleanup_does_not_touch_unknown() -> None:
 
                 assert ticket.status == "active"
                 assert operation.status == "unknown"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_outbox_get_pending() -> None:
+    async def scenario() -> None:
+        engine, factory, _ = await prepare_database()
+
+        try:
+            now = datetime.now(UTC)
+
+            first_id = uuid4()
+            second_id = uuid4()
+            sent_id = uuid4()
+
+            async with factory.begin() as session:
+                session.add_all(
+                    [
+                        Outbox(
+                            id=first_id,
+                            event_type="ticket_purchased",
+                            payload={"message": "First notification"},
+                            status="pending",
+                            created_at=now - timedelta(minutes=2),
+                        ),
+                        Outbox(
+                            id=second_id,
+                            event_type="ticket_purchased",
+                            payload={"message": "Second notification"},
+                            status="pending",
+                            created_at=now - timedelta(minutes=1),
+                        ),
+                        Outbox(
+                            id=sent_id,
+                            event_type="ticket_purchased",
+                            payload={"message": "Sent notification"},
+                            status="sent",
+                            created_at=now,
+                        ),
+                    ]
+                )
+
+            store = PostgresOutboxStore(factory)
+
+            pending = await store.get_pending(limit=10000)
+            pending_ids = [item.id for item in pending]
+
+            assert first_id in pending_ids
+            assert second_id in pending_ids
+            assert sent_id not in pending_ids
+
+            assert pending_ids.index(first_id) < pending_ids.index(second_id)
+
+            assert pending == sorted(
+                pending,
+                key=lambda item: (item.created_at, item.id),
+            )
+
+            limited = await store.get_pending(limit=2)
+
+            assert len(limited) == 2
+            assert [item.id for item in limited] == pending_ids[:2]
 
         finally:
             await engine.dispose()

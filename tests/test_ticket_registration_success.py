@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.infrastructure.db.models import Outbox
 from app.infrastructure.db.ticket_repository import (
     PostgresTicketRepository,
     TicketStateConflict,
@@ -34,6 +35,8 @@ def test_repository_confirms_registration() -> None:
             ]
         )
 
+        session.scalar = AsyncMock(return_value="Test Event")
+
         repository = PostgresTicketRepository(session)
 
         confirmed = await repository.finish_registration_success(
@@ -45,6 +48,18 @@ def test_repository_confirms_registration() -> None:
 
         assert confirmed is True
         assert session.execute.await_count == 2
+
+        session.scalar.assert_awaited_once()
+        session.add.assert_called_once()
+
+        outbox_event = session.add.call_args.args[0]
+
+        assert isinstance(outbox_event, Outbox)
+        assert outbox_event.event_type == "ticket_purchased"
+        assert outbox_event.status == "pending"
+        assert outbox_event.payload["ticket_id"] == str(registration_id)
+        assert "Test Event" in outbox_event.payload["message"]
+        assert outbox_event.created_at == now
 
         statements = [call.args[0] for call in session.execute.await_args_list]
 

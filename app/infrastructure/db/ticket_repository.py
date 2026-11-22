@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.tickets.schemas import TicketCreate
 from app.application.tickets.state import TicketCancellationSnapshot
-from app.infrastructure.db.models import Event, Ticket, TicketOperation
+from app.infrastructure.db.models import Event, Outbox, Ticket, TicketOperation
 
 
 class TicketStateConflict(RuntimeError):
@@ -165,6 +165,32 @@ class PostgresTicketRepository:
             raise TicketStateConflict(
                 "Ticket state changed during registration confirmation"
             )
+
+        event_name = await self._session.scalar(
+            select(Event.name)
+            .join(Ticket, Ticket.event_id == Event.id)
+            .where(Ticket.id == registration_id)
+        )
+
+        if event_name is None:
+            raise TicketStateConflict(
+                "Event not found during registration confirmation"
+            )
+
+        self._session.add(
+            Outbox(
+                id=uuid4(),
+                event_type="ticket_purchased",
+                payload={
+                    "ticket_id": str(registration_id),
+                    "message": (
+                        f"Вы успешно зарегистрированы на мероприятие «{event_name}»."
+                    ),
+                },
+                status="pending",
+                created_at=now,
+            )
+        )
 
         return True
 

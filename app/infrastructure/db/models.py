@@ -11,6 +11,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.db.base import Base
@@ -270,6 +271,46 @@ class SyncState(Base):
     )
 
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+
+class Outbox(Base):
+    __tablename__ = "outbox"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sent')",
+            name="ck_outbox_status",
+        ),
+        Index(
+            "ix_outbox_pending_created_at_id",
+            "created_at",
+            "id",
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+
+    event_type: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default="pending",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
     )
