@@ -1636,3 +1636,50 @@ def test_postgres_outbox_get_pending() -> None:
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_postgres_outbox_mark_sent() -> None:
+    async def scenario() -> None:
+        engine, factory, _ = await prepare_database()
+
+        try:
+            event_id = uuid4()
+            other_id = uuid4()
+
+            async with factory.begin() as session:
+                session.add_all(
+                    [
+                        Outbox(
+                            id=event_id,
+                            event_type="ticket_purchased",
+                            payload={"message": "Test notification"},
+                            status="pending",
+                            created_at=datetime.now(UTC),
+                        ),
+                        Outbox(
+                            id=other_id,
+                            event_type="ticket_purchased",
+                            payload={"message": "Other notification"},
+                            status="pending",
+                            created_at=datetime.now(UTC),
+                        ),
+                    ]
+                )
+
+            store = PostgresOutboxStore(factory)
+            await store.mark_sent(event_id)
+
+            async with factory() as session:
+                sent_event = await session.get(Outbox, event_id)
+                other_event = await session.get(Outbox, other_id)
+
+                assert sent_event is not None
+                assert other_event is not None
+
+                assert sent_event.status == "sent"
+                assert other_event.status == "pending"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

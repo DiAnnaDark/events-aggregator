@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from uuid import UUID
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.infrastructure.db.models import Outbox
@@ -22,3 +24,15 @@ class PostgresOutboxStore:
 
             result = await session.scalars(statement)
             return list(result.all())
+
+    async def mark_sent(self, event_id: UUID) -> None:
+        async with self._session_factory.begin() as session:
+            statement = (
+                update(Outbox)
+                .where(
+                    Outbox.id == event_id,
+                    Outbox.status == "pending",
+                )
+                .values(status="sent")
+            )
+            await session.execute(statement)

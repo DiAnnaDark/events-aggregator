@@ -19,3 +19,8 @@ class Settings(BaseSettings):
 
     outbox_poll_interval_seconds: float = 30.0
     outbox_batch_size: int = 100
+
+    capashino_base_url: str = (
+        "http://student-system-capashino-web.student-system-capashino.svc:8000"
+    )
+    capashino_api_key: SecretStr | None = None

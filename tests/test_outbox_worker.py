@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
+from uuid import uuid4
 
 from app.application.outbox.worker import OutboxWorker
 
@@ -82,5 +83,178 @@ def test_worker_retries_after_error() -> None:
             await worker.stop()
 
         assert calls >= 2
+
+    asyncio.run(scenario())
+
+
+def test_worker_sends_notification_and_marks_sent() -> None:
+    async def scenario() -> None:
+        event_id = uuid4()
+        ticket_id = str(uuid4())
+
+        event = SimpleNamespace(
+            id=event_id,
+            event_type="ticket_purchased",
+            payload={
+                "message": "Билет успешно куплен",
+                "ticket_id": ticket_id,
+            },
+        )
+
+        store = SimpleNamespace(
+            get_pending=AsyncMock(return_value=[event]),
+            mark_sent=AsyncMock(),
+        )
+        sender = SimpleNamespace(send=AsyncMock())
+
+        worker = OutboxWorker(
+            store=store,
+            sender=sender,
+            batch_size=1,
+        )
+
+        result = await worker.run_once()
+
+        assert result == 1
+
+        sender.send.assert_awaited_once_with(
+            message="Билет успешно куплен",
+            reference_id=ticket_id,
+            idempotency_key=str(event_id),
+        )
+
+        store.mark_sent.assert_awaited_once_with(event_id)
+
+    asyncio.run(scenario())
+
+
+def test_worker_retries_notification_with_same_key() -> None:
+    async def scenario() -> None:
+        event_id = uuid4()
+        ticket_id = str(uuid4())
+
+        event = SimpleNamespace(
+            id=event_id,
+            event_type="ticket_purchased",
+            payload={
+                "message": "Билет успешно куплен",
+                "ticket_id": ticket_id,
+            },
+        )
+
+        store = SimpleNamespace(
+            get_pending=AsyncMock(return_value=[event]),
+            mark_sent=AsyncMock(),
+        )
+
+        sender = SimpleNamespace(
+            send=AsyncMock(
+                side_effect=[
+                    RuntimeError("Capashino unavailable"),
+                    None,
+                ]
+            )
+        )
+
+        worker = OutboxWorker(store=store, sender=sender)
+
+        await worker.run_once()
+
+        store.mark_sent.assert_not_awaited()
+
+        await worker.run_once()
+
+        expected_call = call(
+            message="Билет успешно куплен",
+            reference_id=ticket_id,
+            idempotency_key=str(event_id),
+        )
+
+        assert sender.send.await_args_list == [
+            expected_call,
+            expected_call,
+        ]
+
+        store.mark_sent.assert_awaited_once_with(event_id)
+
+    asyncio.run(scenario())
+
+
+def test_worker_skips_invalid_payload() -> None:
+    async def scenario() -> None:
+        event = SimpleNamespace(
+            id=uuid4(),
+            event_type="ticket_purchased",
+            payload={
+                "message": "Билет успешно куплен",
+            },
+        )
+
+        store = SimpleNamespace(
+            get_pending=AsyncMock(return_value=[event]),
+            mark_sent=AsyncMock(),
+        )
+        sender = SimpleNamespace(send=AsyncMock())
+
+        worker = OutboxWorker(store=store, sender=sender)
+
+        result = await worker.run_once()
+
+        assert result == 1
+        sender.send.assert_not_awaited()
+        store.mark_sent.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_worker_retries_when_mark_sent_fails() -> None:
+    async def scenario() -> None:
+        event_id = uuid4()
+        ticket_id = str(uuid4())
+
+        event = SimpleNamespace(
+            id=event_id,
+            event_type="ticket_purchased",
+            payload={
+                "message": "Билет успешно куплен",
+                "ticket_id": ticket_id,
+            },
+        )
+
+        store = SimpleNamespace(
+            get_pending=AsyncMock(return_value=[event]),
+            mark_sent=AsyncMock(
+                side_effect=[
+                    RuntimeError("Database unavailable"),
+                    None,
+                ]
+            ),
+        )
+
+        sender = SimpleNamespace(send=AsyncMock())
+
+        worker = OutboxWorker(store=store, sender=sender)
+
+        await worker.run_once()
+
+        assert store.mark_sent.await_count == 1
+
+        await worker.run_once()
+
+        expected_call = call(
+            message="Билет успешно куплен",
+            reference_id=ticket_id,
+            idempotency_key=str(event_id),
+        )
+
+        assert sender.send.await_args_list == [
+            expected_call,
+            expected_call,
+        ]
+
+        assert store.mark_sent.await_args_list == [
+            call(event_id),
+            call(event_id),
+        ]
 
     asyncio.run(scenario())

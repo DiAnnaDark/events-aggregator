@@ -8,6 +8,7 @@ from app.main import create_app
 
 def test_missing_provider_key_keeps_health_available() -> None:
     settings = MagicMock()
+    settings.capashino_api_key = None
     settings.events_provider_api_key = None
     settings.outbox_poll_interval_seconds = 30.0
     settings.outbox_batch_size = 100
@@ -44,6 +45,7 @@ def test_missing_provider_key_keeps_health_available() -> None:
 
 def test_lifespan_creates_and_closes_resources() -> None:
     settings = MagicMock()
+    settings.capashino_api_key = None
     settings.events_provider_api_key = SecretStr("test-key")
     settings.events_provider_base_url = "http://provider.invalid"
     settings.outbox_poll_interval_seconds = 30.0
@@ -152,3 +154,70 @@ def test_lifespan_creates_and_closes_resources() -> None:
     ]
 
     engine.dispose.assert_awaited_once()
+
+
+def test_lifespan_configures_capashino_and_closes_client() -> None:
+    settings = MagicMock()
+    settings.events_provider_api_key = None
+    settings.capashino_api_key = SecretStr("test-capashino-key")
+    settings.capashino_base_url = "http://capashino.test"
+    settings.outbox_poll_interval_seconds = 30.0
+    settings.outbox_batch_size = 100
+
+    engine = MagicMock()
+    http_client = MagicMock()
+    outbox_worker = MagicMock()
+
+    shutdown_order = []
+
+    async def stop_worker() -> None:
+        shutdown_order.append("worker")
+
+    async def close_http() -> None:
+        shutdown_order.append("http")
+
+    async def dispose_engine() -> None:
+        shutdown_order.append("database")
+
+    outbox_worker.stop = AsyncMock(side_effect=stop_worker)
+    http_client.aclose = AsyncMock(side_effect=close_http)
+    engine.dispose = AsyncMock(side_effect=dispose_engine)
+
+    with (
+        patch("app.main.Settings", return_value=settings),
+        patch("app.main.create_db_engine", return_value=engine),
+        patch("app.main.create_session_factory"),
+        patch(
+            "app.main.httpx.AsyncClient",
+            return_value=http_client,
+        ) as http_client_class,
+        patch("app.main.CapashinoClient") as capashino_class,
+        patch(
+            "app.main.OutboxWorker",
+            return_value=outbox_worker,
+        ) as worker_class,
+        TestClient(create_app()) as client,
+    ):
+        assert client.get("/api/health").status_code == 200
+
+        http_client_class.assert_called_once_with()
+
+        capashino_class.assert_called_once_with(
+            base_url="http://capashino.test",
+            api_key="test-capashino-key",
+            client=http_client,
+        )
+
+        assert worker_class.call_args.kwargs["sender"] is capashino_class.return_value
+
+        outbox_worker.start.assert_called_once_with()
+
+    outbox_worker.stop.assert_awaited_once_with()
+    http_client.aclose.assert_awaited_once_with()
+    engine.dispose.assert_awaited_once_with()
+
+    assert shutdown_order == [
+        "worker",
+        "http",
+        "database",
+    ]
