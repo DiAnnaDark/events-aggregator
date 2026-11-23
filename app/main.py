@@ -25,6 +25,7 @@ from app.infrastructure.db.session import (
 )
 from app.infrastructure.db.sync_store import PostgresSyncStore
 from app.infrastructure.db.ticket_store import PostgresTicketStore
+from app.infrastructure.notifications.client import CapashinoClient
 from app.infrastructure.provider.client import EventsProviderClient
 from app.infrastructure.provider.source import ProviderEventsSource
 
@@ -54,13 +55,35 @@ async def sync_lifespan(
     engine = create_db_engine(settings)
 
     outbox_worker: OutboxWorker | None = None
+    notification_http_client: httpx.AsyncClient | None = None
 
     try:
         session_factory = create_session_factory(engine)
         application.state.db_session_factory = session_factory
 
+        capashino_secret = settings.capashino_api_key
+        capashino_api_key = (
+            capashino_secret.get_secret_value() if capashino_secret is not None else ""
+        )
+
+        sender = None
+
+        if capashino_api_key.strip():
+            notification_http_client = httpx.AsyncClient()
+
+            sender = CapashinoClient(
+                base_url=settings.capashino_base_url,
+                api_key=capashino_api_key,
+                client=notification_http_client,
+            )
+        else:
+            logger.warning(
+                "Capashino API key is not configured; outbox notifications are disabled"
+            )
+
         outbox_worker = OutboxWorker(
             store=PostgresOutboxStore(session_factory),
+            sender=sender,
             poll_interval_seconds=settings.outbox_poll_interval_seconds,
             batch_size=settings.outbox_batch_size,
         )
@@ -120,6 +143,8 @@ async def sync_lifespan(
     finally:
         if outbox_worker is not None:
             await outbox_worker.stop()
+        if notification_http_client is not None:
+            await notification_http_client.aclose()
         if hasattr(application.state, "db_session_factory"):
             del application.state.db_session_factory
             if hasattr(application.state, "registration_provider"):
