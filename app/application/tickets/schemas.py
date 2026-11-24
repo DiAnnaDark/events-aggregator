@@ -27,6 +27,7 @@ class TicketCreate(BaseModel):
     last_name: PersonName
     email: EmailStr
     seat: SeatName
+    idempotency_key: str | None = None
 
 
 class TicketCreated(BaseModel):

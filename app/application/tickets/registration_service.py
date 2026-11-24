@@ -45,7 +45,17 @@ class RegistrationProvider(Protocol):
     ) -> UUID: ...
 
 
+class RegistrationSnapshot(Protocol):
+    registration_id: UUID
+    request_fingerprint: str
+    status: str
+
+
 class RegistrationStore(Protocol):
+    async def get_registration_by_key(
+        self,
+        key: str,
+    ) -> RegistrationSnapshot | None: ...
     async def reserve_registration(
         self,
         *,
@@ -113,6 +123,10 @@ class RegistrationStateError(TicketRegistrationError):
     pass
 
 
+class IdempotencyConflict(TicketRegistrationError):
+    pass
+
+
 class ProviderRegistrationRejected(TicketRegistrationError):
     pass
 
@@ -139,7 +153,40 @@ class TicketRegistrationService:
         self._clock = clock
         self._new_id = new_id
 
+    async def _find_successful_registration(
+        self,
+        key: str | None,
+        fingerprint: str,
+    ) -> UUID | None:
+        if key is None:
+            return None
+
+        existing = await self._store.get_registration_by_key(key)
+
+        if existing is None:
+            return None
+
+        if existing.request_fingerprint != fingerprint:
+            raise IdempotencyConflict(
+                "Idempotency key is already used for different data"
+            )
+
+        if existing.status == "success":
+            return existing.registration_id
+
+        raise RegistrationStateError("Registration with this key is not yet confirmed")
+
     async def register(self, request: TicketCreate) -> UUID:
+        fingerprint = sha256(
+            request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+        ).hexdigest()
+
+        existing_ticket_id = await self._find_successful_registration(
+            request.idempotency_key, fingerprint
+        )
+        if existing_ticket_id is not None:
+            return existing_ticket_id
+
         event = await self._events.get_event(request.event_id)
 
         if event is None:
@@ -159,6 +206,12 @@ class TicketRegistrationService:
             raise SeatLookupUnavailable("Unable to check available seats") from error
 
         if request.seat not in available_seats:
+            existing_ticket_id = await self._find_successful_registration(
+                request.idempotency_key, fingerprint
+            )
+            if existing_ticket_id is not None:
+                return existing_ticket_id
+
             raise SeatUnavailable("Selected seat is unavailable")
 
         now = self._clock()
@@ -169,8 +222,6 @@ class TicketRegistrationService:
         registration_id = self._new_id()
         operation_id = self._new_id()
 
-        fingerprint = sha256(request.model_dump_json().encode("utf-8")).hexdigest()
-
         reserved = await self._store.reserve_registration(
             registration_id=registration_id,
             operation_id=operation_id,
@@ -180,6 +231,12 @@ class TicketRegistrationService:
         )
 
         if not reserved:
+            existing_ticket_id = await self._find_successful_registration(
+                request.idempotency_key, fingerprint
+            )
+            if existing_ticket_id is not None:
+                return existing_ticket_id
+
             raise SeatUnavailable("Selected seat is already reserved")
 
         started = await self._store.mark_registration_in_flight(

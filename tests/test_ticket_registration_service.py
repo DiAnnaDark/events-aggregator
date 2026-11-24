@@ -1,13 +1,16 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from app.api.tickets import create_ticket
 from app.application.tickets.registration_service import (
     EventNotFound,
     ProviderRegistrationRejected,
@@ -324,3 +327,199 @@ def test_failed_confirmation_does_not_return_ticket() -> None:
     scenario.store.finish_registration_success.assert_awaited_once()
 
     scenario.seats.invalidate.assert_not_awaited()
+
+
+def test_repeated_registration_returns_existing_ticket() -> None:
+    scenario = make_scenario()
+
+    scenario.request = scenario.request.model_copy(
+        update={"idempotency_key": "purchase-123"}
+    )
+
+    fingerprint = sha256(
+        scenario.request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        return_value=SimpleNamespace(
+            registration_id=scenario.registration_id,
+            request_fingerprint=fingerprint,
+            status="success",
+        )
+    )
+
+    ticket_id = asyncio.run(scenario.service.register(scenario.request))
+
+    assert ticket_id == scenario.registration_id
+
+    scenario.store.get_registration_by_key.assert_awaited_once_with("purchase-123")
+
+    scenario.events.get_event.assert_not_awaited()
+    scenario.seats.get_available_seats.assert_not_awaited()
+    scenario.store.reserve_registration.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+
+
+def test_idempotency_key_with_different_data_returns_409() -> None:
+    scenario = make_scenario()
+
+    original = scenario.request.model_copy(update={"idempotency_key": "purchase-123"})
+
+    fingerprint = sha256(
+        original.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.request = original.model_copy(update={"seat": "A16"})
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        return_value=SimpleNamespace(
+            registration_id=scenario.registration_id,
+            request_fingerprint=fingerprint,
+            status="success",
+        )
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(create_ticket(scenario.request, scenario.service))
+
+    assert caught.value.status_code == 409
+
+    scenario.store.reserve_registration.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+
+
+def test_duplicate_reservation_returns_existing_successful_ticket() -> None:
+    scenario = make_scenario()
+    scenario.request = scenario.request.model_copy(
+        update={"idempotency_key": "race-123"}
+    )
+
+    existing_ticket_id = uuid4()
+
+    fingerprint = sha256(
+        scenario.request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        side_effect=[
+            None,
+            SimpleNamespace(
+                registration_id=existing_ticket_id,
+                request_fingerprint=fingerprint,
+                status="success",
+            ),
+        ]
+    )
+
+    scenario.store.reserve_registration.return_value = False
+
+    ticket_id = asyncio.run(scenario.service.register(scenario.request))
+
+    assert ticket_id == existing_ticket_id
+    assert scenario.store.get_registration_by_key.await_count == 2
+
+    scenario.store.reserve_registration.assert_awaited_once()
+    scenario.store.mark_registration_in_flight.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+    scenario.store.finish_registration_success.assert_not_awaited()
+
+
+def test_duplicate_request_returns_existing_ticket_when_seat_is_unavailable() -> None:
+    scenario = make_scenario()
+
+    scenario.request = scenario.request.model_copy(
+        update={"idempotency_key": "seat-race-123"}
+    )
+
+    existing_ticket_id = uuid4()
+
+    fingerprint = sha256(
+        scenario.request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        side_effect=[
+            None,
+            SimpleNamespace(
+                registration_id=existing_ticket_id,
+                request_fingerprint=fingerprint,
+                status="success",
+            ),
+        ]
+    )
+
+    scenario.seats.get_available_seats.return_value = ["A16"]
+
+    ticket_id = asyncio.run(scenario.service.register(scenario.request))
+
+    assert ticket_id == existing_ticket_id
+    assert scenario.store.get_registration_by_key.await_count == 2
+
+    scenario.store.reserve_registration.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+    scenario.store.finish_registration_success.assert_not_awaited()
+
+
+def test_unknown_registration_key_returns_503_without_retry() -> None:
+    scenario = make_scenario()
+    key = "unknown-123"
+
+    scenario.request = scenario.request.model_copy(update={"idempotency_key": key})
+
+    fingerprint = sha256(
+        scenario.request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        return_value=SimpleNamespace(
+            registration_id=scenario.registration_id,
+            request_fingerprint=fingerprint,
+            status="unknown",
+        )
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(create_ticket(scenario.request, scenario.service))
+
+    assert caught.value.status_code == 503
+
+    scenario.store.get_registration_by_key.assert_awaited_once_with(key)
+    scenario.events.get_event.assert_not_awaited()
+    scenario.seats.get_available_seats.assert_not_awaited()
+    scenario.store.reserve_registration.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+    scenario.store.finish_registration_success.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", ["prepared", "in_flight"])
+def test_unfinished_registration_key_returns_503_without_retry(
+    status: str,
+) -> None:
+    scenario = make_scenario()
+    key = "unfinished-123"
+
+    scenario.request = scenario.request.model_copy(update={"idempotency_key": key})
+
+    fingerprint = sha256(
+        scenario.request.model_dump_json(exclude={"idempotency_key"}).encode("utf-8")
+    ).hexdigest()
+
+    scenario.store.get_registration_by_key = AsyncMock(
+        return_value=SimpleNamespace(
+            registration_id=scenario.registration_id,
+            request_fingerprint=fingerprint,
+            status=status,
+        )
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(create_ticket(scenario.request, scenario.service))
+
+    assert caught.value.status_code == 503
+
+    scenario.store.get_registration_by_key.assert_awaited_once_with(key)
+    scenario.events.get_event.assert_not_awaited()
+    scenario.seats.get_available_seats.assert_not_awaited()
+    scenario.store.reserve_registration.assert_not_awaited()
+    scenario.provider.register.assert_not_awaited()
+    scenario.store.finish_registration_success.assert_not_awaited()

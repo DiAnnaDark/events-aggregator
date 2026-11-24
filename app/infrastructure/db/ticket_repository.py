@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -18,6 +18,35 @@ class TicketStateConflict(RuntimeError):
 class PostgresTicketRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_registration_by_key(
+        self,
+        key: str,
+        *,
+        ttl_hours: int = 24,
+    ) -> TicketOperation | None:
+        expired_before = datetime.now(UTC) - timedelta(hours=ttl_hours)
+
+        expire_statement = (
+            update(TicketOperation)
+            .where(
+                TicketOperation.idempotency_key == key,
+                TicketOperation.operation_type == "register",
+                TicketOperation.status == "success",
+                TicketOperation.finished_at.is_not(None),
+                TicketOperation.finished_at <= expired_before,
+            )
+            .values(idempotency_key=None)
+        )
+
+        await self._session.execute(expire_statement)
+
+        statement = select(TicketOperation).where(
+            TicketOperation.idempotency_key == key,
+            TicketOperation.operation_type == "register",
+        )
+
+        return await self._session.scalar(statement)
 
     async def reserve_registration(
         self,
@@ -63,7 +92,7 @@ class PostgresTicketRepository:
             id=operation_id,
             registration_id=registration_id,
             operation_type="register",
-            idempotency_key=None,
+            idempotency_key=request.idempotency_key,
             request_fingerprint=request_fingerprint,
             status="prepared",
             provider_http_status=None,
@@ -228,6 +257,9 @@ class PostgresTicketRepository:
             )
             .returning(TicketOperation.id)
         )
+
+        if outcome == "failed":
+            operation_statement = operation_statement.values(idempotency_key=None)
 
         operation_result = await self._session.execute(operation_statement)
 

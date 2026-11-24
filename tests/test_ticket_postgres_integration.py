@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.api.tickets import get_ticket_cancellation_service
 from app.application.tickets.cancellation_service import TicketCancellationService
+from app.application.tickets.registration_service import TicketRegistrationService
 from app.application.tickets.schemas import TicketCreate
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
@@ -1678,6 +1679,563 @@ def test_postgres_outbox_mark_sent() -> None:
 
                 assert sent_event.status == "sent"
                 assert other_event.status == "pending"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_get_registration_by_key() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+
+            reserved, registration_id, operation_id = await try_reserve(
+                store,
+                event_id=event_id,
+            )
+
+            assert reserved is True
+
+            key = f"purchase-{uuid4()}"
+
+            key = f"purchase-{uuid4()}"
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(idempotency_key=key)
+                )
+
+            found = await store.get_registration_by_key(key)
+
+            assert found is not None
+            assert found.registration_id == registration_id
+            assert found.request_fingerprint == "integration-test"
+            assert found.status == "prepared"
+
+            missing = await store.get_registration_by_key("unknown-key")
+            assert missing is None
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_reserve_registration_saves_idempotency_key() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            key = f"purchase-{uuid4()}"
+            registration_id = uuid4()
+            operation_id = uuid4()
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A16",
+                idempotency_key=key,
+            )
+
+            reserved = await store.reserve_registration(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                request=request,
+                request_fingerprint="new-purchase-fingerprint",
+                now=datetime.now(UTC),
+            )
+
+            assert reserved is True
+
+            found = await store.get_registration_by_key(key)
+
+            assert found is not None
+            assert found.registration_id == registration_id
+            assert found.request_fingerprint == "new-purchase-fingerprint"
+            assert found.status == "prepared"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_concurrent_same_idempotency_key() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            key = f"concurrent-{uuid4()}"
+
+            async def reserve(seat: str) -> bool:
+                request = TicketCreate(
+                    event_id=event_id,
+                    first_name="Anna",
+                    last_name="Test",
+                    email="anna@example.com",
+                    seat=seat,
+                    idempotency_key=key,
+                )
+
+                return await store.reserve_registration(
+                    registration_id=uuid4(),
+                    operation_id=uuid4(),
+                    request=request,
+                    request_fingerprint="concurrent-test",
+                    now=datetime.now(UTC),
+                )
+
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    reserve("A97"),
+                    reserve("A98"),
+                    return_exceptions=True,
+                ),
+                timeout=15.0,
+            )
+
+            assert sum(result is True for result in results) == 1
+            assert sum(result is False for result in results) == 1, repr(results)
+
+            async with factory() as session:
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(TicketOperation)
+                    .where(TicketOperation.idempotency_key == key)
+                )
+
+                assert count == 1
+
+                ticket_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Ticket)
+                    .where(
+                        Ticket.event_id == event_id,
+                        Ticket.seat.in_(["A97", "A98"]),
+                    )
+                )
+
+                assert ticket_count == 1
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_failed_registration_allows_retry_with_same_key() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            key = f"failed-retry-{uuid4()}"
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A17",
+                idempotency_key=key,
+            )
+
+            registration_id = uuid4()
+            operation_id = uuid4()
+
+            assert await store.reserve_registration(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                request=request,
+                request_fingerprint="failed-retry-test",
+                now=datetime.now(UTC),
+            )
+
+            assert await store.mark_registration_in_flight(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                now=datetime.now(UTC),
+            )
+
+            assert await store.record_registration_error(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                outcome="failed",
+                provider_http_status=400,
+                error_code="provider_rejected",
+                now=datetime.now(UTC),
+            )
+
+            found = await store.get_registration_by_key(key)
+            assert found is None
+
+            async with factory() as session:
+                old_operation = await session.get(TicketOperation, operation_id)
+
+                assert old_operation is not None
+                assert old_operation.status == "failed"
+                assert old_operation.idempotency_key is None
+
+            new_registration_id = uuid4()
+
+            assert await store.reserve_registration(
+                registration_id=new_registration_id,
+                operation_id=uuid4(),
+                request=request,
+                request_fingerprint="failed-retry-test",
+                now=datetime.now(UTC),
+            )
+
+            repeated = await store.get_registration_by_key(key)
+
+            assert repeated is not None
+            assert repeated.registration_id == new_registration_id
+            assert repeated.status == "prepared"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_unknown_registration_keeps_idempotency_key() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            key = f"unknown-{uuid4()}"
+            registration_id = uuid4()
+            operation_id = uuid4()
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A18",
+                idempotency_key=key,
+            )
+
+            assert await store.reserve_registration(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                request=request,
+                request_fingerprint="unknown-first",
+                now=datetime.now(UTC),
+            )
+
+            assert await store.mark_registration_in_flight(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                now=datetime.now(UTC),
+            )
+
+            assert await store.record_registration_error(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                outcome="unknown",
+                provider_http_status=500,
+                error_code="provider_error",
+                now=datetime.now(UTC),
+            )
+
+            found = await store.get_registration_by_key(key)
+
+            assert found is not None
+            assert found.registration_id == registration_id
+            assert found.status == "unknown"
+            assert found.idempotency_key == key
+
+            another_request = request.model_copy(update={"seat": "A19"})
+
+            reserved_again = await store.reserve_registration(
+                registration_id=uuid4(),
+                operation_id=uuid4(),
+                request=another_request,
+                request_fingerprint="unknown-second",
+                now=datetime.now(UTC),
+            )
+
+            assert reserved_again is False
+
+            async with factory() as session:
+                operation_count = await session.scalar(
+                    select(func.count())
+                    .select_from(TicketOperation)
+                    .where(TicketOperation.idempotency_key == key)
+                )
+
+                ticket_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Ticket)
+                    .where(
+                        Ticket.event_id == event_id,
+                        Ticket.seat.in_(["A18", "A19"]),
+                    )
+                )
+
+                assert operation_count == 1
+                assert ticket_count == 1
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_repeated_success_creates_one_outbox_event() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            now = datetime.now(UTC)
+            key = f"outbox-retry-{uuid4()}"
+
+            events = SimpleNamespace(
+                get_event=AsyncMock(
+                    return_value=SimpleNamespace(
+                        status="published",
+                        registration_deadline=now + timedelta(days=6),
+                        event_time=now + timedelta(days=7),
+                    )
+                )
+            )
+
+            seats = SimpleNamespace(
+                get_available_seats=AsyncMock(return_value=["A25"]),
+                invalidate=AsyncMock(),
+            )
+
+            provider = SimpleNamespace(register=AsyncMock(return_value=uuid4()))
+
+            store = PostgresTicketStore(factory)
+
+            service = TicketRegistrationService(
+                events=events,
+                seats=seats,
+                provider=provider,
+                store=store,
+                clock=lambda: now,
+            )
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A25",
+                idempotency_key=key,
+            )
+
+            first_ticket_id = await service.register(request)
+            second_ticket_id = await service.register(request)
+
+            assert second_ticket_id == first_ticket_id
+
+            provider.register.assert_awaited_once()
+            events.get_event.assert_awaited_once_with(event_id)
+            seats.get_available_seats.assert_awaited_once_with(event_id)
+            seats.invalidate.assert_awaited_once_with(event_id)
+
+            existing = await store.get_registration_by_key(key)
+
+            assert existing is not None
+            assert existing.registration_id == first_ticket_id
+            assert existing.status == "success"
+
+            async with factory() as session:
+                outbox_events = (
+                    await session.scalars(
+                        select(Outbox).where(
+                            Outbox.payload["ticket_id"].astext == str(first_ticket_id)
+                        )
+                    )
+                ).all()
+
+                assert len(outbox_events) == 1
+                assert outbox_events[0].event_type == "ticket_purchased"
+                assert outbox_events[0].status == "pending"
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_expired_success_releases_key_but_keeps_ticket_and_outbox() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(factory)
+            now = datetime.now(UTC)
+            key = f"expired-success-{uuid4()}"
+            registration_id = uuid4()
+            operation_id = uuid4()
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A36",
+                idempotency_key=key,
+            )
+
+            assert await store.reserve_registration(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                request=request,
+                request_fingerprint="expired-success-test",
+                now=now,
+            )
+
+            assert await store.mark_registration_in_flight(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                now=now,
+            )
+
+            assert await store.finish_registration_success(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                provider_ticket_id=uuid4(),
+                now=now,
+            )
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(finished_at=now - timedelta(hours=25))
+                )
+
+            found = await store.get_registration_by_key(key)
+
+            assert found is None
+
+            async with factory() as session:
+                operation = await session.get(TicketOperation, operation_id)
+                ticket = await session.get(Ticket, registration_id)
+
+                outbox_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Outbox)
+                    .where(Outbox.payload["ticket_id"].astext == str(registration_id))
+                )
+
+                assert operation is not None
+                assert operation.status == "success"
+                assert operation.idempotency_key is None
+
+                assert ticket is not None
+                assert ticket.status == "active"
+                assert outbox_count == 1
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_custom_idempotency_ttl_48_hours() -> None:
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            store = PostgresTicketStore(
+                factory,
+                idempotency_ttl_hours=48,
+            )
+
+            now = datetime.now(UTC)
+            key = f"ttl-48-{uuid4()}"
+            registration_id = uuid4()
+            operation_id = uuid4()
+
+            request = TicketCreate(
+                event_id=event_id,
+                first_name="Anna",
+                last_name="Test",
+                email="anna@example.com",
+                seat="A37",
+                idempotency_key=key,
+            )
+
+            assert await store.reserve_registration(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                request=request,
+                request_fingerprint="ttl-48-test",
+                now=now,
+            )
+
+            assert await store.mark_registration_in_flight(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                now=now,
+            )
+
+            assert await store.finish_registration_success(
+                registration_id=registration_id,
+                operation_id=operation_id,
+                provider_ticket_id=uuid4(),
+                now=now,
+            )
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(finished_at=now - timedelta(hours=25))
+                )
+
+            active = await store.get_registration_by_key(key)
+
+            assert active is not None
+            assert active.registration_id == registration_id
+            assert active.status == "success"
+            assert active.idempotency_key == key
+
+            async with factory.begin() as session:
+                await session.execute(
+                    update(TicketOperation)
+                    .where(TicketOperation.id == operation_id)
+                    .values(finished_at=now - timedelta(hours=49))
+                )
+
+            expired = await store.get_registration_by_key(key)
+
+            assert expired is None
+
+            async with factory() as session:
+                operation = await session.get(TicketOperation, operation_id)
+                ticket = await session.get(Ticket, registration_id)
+
+                outbox_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Outbox)
+                    .where(Outbox.payload["ticket_id"].astext == str(registration_id))
+                )
+
+                assert operation is not None
+                assert operation.status == "success"
+                assert operation.idempotency_key is None
+
+                assert ticket is not None
+                assert ticket.status == "active"
+                assert outbox_count == 1
 
         finally:
             await engine.dispose()
