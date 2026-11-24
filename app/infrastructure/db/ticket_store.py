@@ -2,10 +2,12 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.tickets.schemas import TicketCreate
 from app.application.tickets.state import TicketCancellationSnapshot
+from app.infrastructure.db.models import TicketOperation
 from app.infrastructure.db.ticket_repository import PostgresTicketRepository
 
 
@@ -13,8 +15,26 @@ class PostgresTicketStore:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        idempotency_ttl_hours: int = 24,
     ) -> None:
+        if idempotency_ttl_hours < 1:
+            raise ValueError("Idempotency TTL must be positive")
+
         self._session_factory = session_factory
+        self._idempotency_ttl_hours = idempotency_ttl_hours
+
+    async def get_registration_by_key(
+        self,
+        key: str,
+    ) -> TicketOperation | None:
+        async with self._session_factory.begin() as session:
+            repository = PostgresTicketRepository(session)
+
+            return await repository.get_registration_by_key(
+                key,
+                ttl_hours=self._idempotency_ttl_hours,
+            )
 
     async def reserve_registration(
         self,
@@ -25,16 +45,24 @@ class PostgresTicketStore:
         request_fingerprint: str,
         now: datetime,
     ) -> bool:
-        async with self._session_factory.begin() as session:
-            repository = PostgresTicketRepository(session)
+        try:
+            async with self._session_factory.begin() as session:
+                repository = PostgresTicketRepository(session)
 
-            return await repository.reserve_registration(
-                registration_id=registration_id,
-                operation_id=operation_id,
-                request=request,
-                request_fingerprint=request_fingerprint,
-                now=now,
-            )
+                return await repository.reserve_registration(
+                    registration_id=registration_id,
+                    operation_id=operation_id,
+                    request=request,
+                    request_fingerprint=request_fingerprint,
+                    now=now,
+                )
+        except IntegrityError as error:
+            cause = getattr(error.orig, "__cause__", None)
+            if getattr(cause, "constraint_name", None) != (
+                "ticket_operations_idempotency_key_key"
+            ):
+                raise
+            return False
 
     async def mark_registration_in_flight(
         self,

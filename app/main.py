@@ -60,6 +60,9 @@ async def sync_lifespan(
     try:
         session_factory = create_session_factory(engine)
         application.state.db_session_factory = session_factory
+        application.state.ticket_idempotency_ttl_hours = (
+            settings.ticket_idempotency_ttl_hours
+        )
 
         capashino_secret = settings.capashino_api_key
         capashino_api_key = (

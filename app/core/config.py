@@ -1,4 +1,4 @@
-from pydantic import SecretStr
+from pydantic import PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     events_provider_base_url: str = "http://events-provider.dev-2.python-labs.ru"
     events_provider_api_key: SecretStr | None = None
+
+    ticket_idempotency_ttl_hours: PositiveInt = 24
 
     outbox_poll_interval_seconds: float = 30.0
     outbox_batch_size: int = 100

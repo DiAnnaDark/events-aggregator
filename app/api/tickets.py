@@ -16,6 +16,7 @@ from app.application.tickets.cancellation_service import (
 )
 from app.application.tickets.registration_service import (
     EventNotFound,
+    IdempotencyConflict,
     ProviderRegistrationRejected,
     ProviderResultUnknown,
     RegistrationClosed,
@@ -67,7 +68,14 @@ def get_ticket_registration_service(
         events=PostgresTicketEventReader(session_factory),
         seats=seats_service,
         provider=provider,
-        store=PostgresTicketStore(session_factory),
+        store=PostgresTicketStore(
+            session_factory,
+            idempotency_ttl_hours=getattr(
+                request.app.state,
+                "ticket_idempotency_ttl_hours",
+                24,
+            ),
+        ),
     )
 
 
@@ -96,6 +104,7 @@ async def create_ticket(
         ) from error
 
     except (
+        IdempotencyConflict,
         RegistrationUnavailable,
         RegistrationClosed,
         SeatUnavailable,
