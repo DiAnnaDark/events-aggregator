@@ -18,6 +18,7 @@ from app.application.sync.scheduler import DailySyncScheduler
 from app.application.sync.service import SyncService
 from app.application.tickets.recovery_scheduler import TicketRecoveryScheduler
 from app.core.config import Settings
+from app.core.monitoring import init_monitoring
 from app.infrastructure.db.outbox_store import PostgresOutboxStore
 from app.infrastructure.db.session import (
     create_db_engine,
@@ -52,6 +53,7 @@ async def sync_lifespan(
     application: FastAPI,
 ) -> AsyncIterator[None]:
     settings = Settings()
+    init_monitoring(settings.sentry_dsn)
     engine = create_db_engine(settings)
 
     outbox_worker: OutboxWorker | None = None

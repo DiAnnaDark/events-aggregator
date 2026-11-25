@@ -26,3 +26,5 @@ class Settings(BaseSettings):
         "http://student-system-capashino-web.student-system-capashino.svc:8000"
     )
     capashino_api_key: SecretStr | None = None
+
+    sentry_dsn: SecretStr | None = None
