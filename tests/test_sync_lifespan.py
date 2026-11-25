@@ -8,6 +8,7 @@ from app.main import create_app
 
 def test_missing_provider_key_keeps_health_available() -> None:
     settings = MagicMock()
+    settings.sentry_dsn = None
     settings.capashino_api_key = None
     settings.events_provider_api_key = None
     settings.outbox_poll_interval_seconds = 30.0
@@ -45,6 +46,7 @@ def test_missing_provider_key_keeps_health_available() -> None:
 
 def test_lifespan_creates_and_closes_resources() -> None:
     settings = MagicMock()
+    settings.sentry_dsn = None
     settings.capashino_api_key = None
     settings.events_provider_api_key = SecretStr("test-key")
     settings.events_provider_base_url = "http://provider.invalid"
@@ -158,6 +160,7 @@ def test_lifespan_creates_and_closes_resources() -> None:
 
 def test_lifespan_configures_capashino_and_closes_client() -> None:
     settings = MagicMock()
+    settings.sentry_dsn = None
     settings.events_provider_api_key = None
     settings.capashino_api_key = SecretStr("test-capashino-key")
     settings.capashino_base_url = "http://capashino.test"
