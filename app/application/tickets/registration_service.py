@@ -8,6 +8,7 @@ import httpx
 
 from app.application.events.schemas import EventDetail
 from app.application.tickets.schemas import TicketCreate
+from app.core.enums import EventStatus, OperationStatus
 
 
 def utc_now() -> datetime:
@@ -48,7 +49,7 @@ class RegistrationProvider(Protocol):
 class RegistrationSnapshot(Protocol):
     registration_id: UUID
     request_fingerprint: str
-    status: str
+    status: OperationStatus
 
 
 class RegistrationStore(Protocol):
@@ -171,7 +172,7 @@ class TicketRegistrationService:
                 "Idempotency key is already used for different data"
             )
 
-        if existing.status == "success":
+        if existing.status == OperationStatus.SUCCESS:
             return existing.registration_id
 
         raise RegistrationStateError("Registration with this key is not yet confirmed")
@@ -192,7 +193,7 @@ class TicketRegistrationService:
         if event is None:
             raise EventNotFound("Event not found")
 
-        if event.status != "published":
+        if event.status != EventStatus.PUBLISHED:
             raise RegistrationUnavailable("Event is not available for registration")
 
         now = self._clock()

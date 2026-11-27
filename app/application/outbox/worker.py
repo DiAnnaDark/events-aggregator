@@ -5,12 +5,14 @@ from contextlib import suppress
 from typing import Protocol
 from uuid import UUID
 
+from app.core.enums import OutboxEventType
+
 logger = logging.getLogger(__name__)
 
 
 class OutboxEvent(Protocol):
     id: UUID
-    event_type: str
+    event_type: OutboxEventType | str
     payload: dict[str, object]
 
 
@@ -83,7 +85,7 @@ class OutboxWorker:
 
         for event in pending:
             try:
-                if event.event_type != "ticket_purchased":
+                if event.event_type != OutboxEventType.TICKET_PURCHASED:
                     logger.error(
                         "Unsupported outbox event type: %s",
                         event.event_type,

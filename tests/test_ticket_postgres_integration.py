@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from sqlalchemy import event, func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
@@ -21,15 +22,28 @@ from app.api.tickets import get_ticket_cancellation_service
 from app.application.tickets.cancellation_service import TicketCancellationService
 from app.application.tickets.registration_service import TicketRegistrationService
 from app.application.tickets.schemas import TicketCreate
+from app.core.enums import (
+    EventStatus,
+    OperationStatus,
+    OperationType,
+    OutboxEventType,
+    OutboxStatus,
+    SyncStatus,
+    TicketStatus,
+)
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
     Event,
     Outbox,
     Place,
+    SyncState,
     Ticket,
     TicketOperation,
 )
 from app.infrastructure.db.outbox_store import PostgresOutboxStore
+from app.infrastructure.db.sync_state_repository import (
+    PostgresSyncStateRepository,
+)
 from app.infrastructure.db.ticket_repository import TicketStateConflict
 from app.infrastructure.db.ticket_store import PostgresTicketStore
 from app.main import create_app
@@ -184,8 +198,11 @@ def test_postgres_successful_registration() -> None:
                 assert operation is not None
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert ticket.provider_ticket_id == provider_ticket_id
+                assert operation.operation_type is OperationType.REGISTER
                 assert operation.status == "success"
+                assert operation.status is OperationStatus.SUCCESS
 
                 outbox_events = (
                     await session.scalars(
@@ -200,6 +217,7 @@ def test_postgres_successful_registration() -> None:
                 outbox_event = outbox_events[0]
 
                 assert outbox_event.event_type == "ticket_purchased"
+                assert outbox_event.event_type is OutboxEventType.TICKET_PURCHASED
                 assert outbox_event.status == "pending"
                 assert "Integration Test Event" in outbox_event.payload["message"]
 
@@ -265,8 +283,10 @@ def test_postgres_outbox_failure_rolls_back_registration() -> None:
                 assert operation is not None
 
                 assert ticket.status == "pending"
+                assert ticket.status is TicketStatus.PENDING
                 assert ticket.provider_ticket_id is None
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
                 outbox_count = await session.scalar(
                     select(func.count())
@@ -355,6 +375,7 @@ def test_postgres_failed_registration_releases_seat() -> None:
 
                 assert ticket is not None
                 assert ticket.status == "failed"
+                assert ticket.status is TicketStatus.FAILED
 
         finally:
             await engine.dispose()
@@ -409,7 +430,9 @@ def test_postgres_unknown_registration_keeps_seat() -> None:
                 assert operation is not None
 
                 assert ticket.status == "uncertain"
+                assert ticket.status is TicketStatus.UNCERTAIN
                 assert operation.status == "unknown"
+                assert operation.status is OperationStatus.UNKNOWN
 
         finally:
             await engine.dispose()
@@ -465,6 +488,7 @@ def test_postgres_transaction_rolls_back_on_conflict() -> None:
 
                 # The first UPDATE must have been rolled back.
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
         finally:
             await engine.dispose()
@@ -515,7 +539,9 @@ def test_postgres_stale_prepared_releases_seat() -> None:
                 assert operation is not None
 
                 assert ticket.status == "failed"
+                assert ticket.status is TicketStatus.FAILED
                 assert operation.status == "failed"
+                assert operation.status is OperationStatus.FAILED
                 assert operation.error_code == "stale_prepared"
 
             second, _, _ = await try_reserve(
@@ -579,6 +605,7 @@ def test_postgres_in_flight_cannot_be_expired() -> None:
 
                 assert operation is not None
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
         finally:
             await engine.dispose()
@@ -642,11 +669,14 @@ def test_postgres_prepare_cancellation() -> None:
                 assert operation is not None
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert ticket.provider_ticket_id is not None
 
                 assert operation.registration_id == ticket_id
                 assert operation.operation_type == "cancel"
+                assert operation.operation_type is OperationType.CANCEL
                 assert operation.status == "prepared"
+                assert operation.status is OperationStatus.PREPARED
 
         finally:
             await engine.dispose()
@@ -723,6 +753,7 @@ def test_postgres_pending_ticket_cannot_be_cancelled() -> None:
 
                 assert ticket is not None
                 assert ticket.status == "pending"
+                assert ticket.status is TicketStatus.PENDING
 
         finally:
             await engine.dispose()
@@ -802,8 +833,10 @@ def test_postgres_cancellation_state_transitions() -> None:
                 assert operation is not None
 
                 assert ticket.status == "cancelled"
+                assert ticket.status is TicketStatus.CANCELLED
                 assert ticket.cancelled_at is not None
                 assert operation.status == "success"
+                assert operation.status is OperationStatus.SUCCESS
                 assert operation.provider_http_status == 200
                 assert operation.finished_at is not None
 
@@ -845,7 +878,9 @@ def test_postgres_cancellation_cannot_finish_before_start() -> None:
                 )
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "prepared"
+                assert operation.status is OperationStatus.PREPARED
 
         finally:
             await engine.dispose()
@@ -933,6 +968,7 @@ def test_postgres_cancellation_start_checks_event_time() -> None:
                 )
 
                 assert operation.status == "prepared"
+                assert operation.status is OperationStatus.PREPARED
 
         finally:
             await engine.dispose()
@@ -987,6 +1023,7 @@ def test_postgres_cancellation_confirmation_rolls_back() -> None:
                 )
 
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
         finally:
             await engine.dispose()
@@ -1073,7 +1110,9 @@ def test_postgres_cancellation_failure_keeps_ticket_active() -> None:
                 assert ticket is not None
                 assert operation is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "failed"
+                assert operation.status is OperationStatus.FAILED
 
             retry = await store.prepare_cancellation(
                 ticket_id=ticket_id,
@@ -1123,7 +1162,9 @@ def test_postgres_unknown_cancellation_blocks_retry() -> None:
                 assert ticket is not None
                 assert operation is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "unknown"
+                assert operation.status is OperationStatus.UNKNOWN
 
             retry = await store.prepare_cancellation(
                 ticket_id=ticket_id,
@@ -1175,6 +1216,7 @@ def test_postgres_cancellation_error_requires_in_flight() -> None:
 
                 assert operation is not None
                 assert operation.status == "prepared"
+                assert operation.status is OperationStatus.PREPARED
 
         finally:
             await engine.dispose()
@@ -1216,7 +1258,9 @@ def test_postgres_aborted_prepared_cancellation_allows_retry() -> None:
                 assert ticket is not None
                 assert operation is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "failed"
+                assert operation.status is OperationStatus.FAILED
                 assert operation.error_code == "cancellation_not_started"
 
             retry = await store.prepare_cancellation(
@@ -1283,7 +1327,9 @@ def test_postgres_in_flight_cancellation_cannot_be_aborted() -> None:
                 assert ticket is not None
                 assert operation is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
         finally:
             await engine.dispose()
@@ -1364,6 +1410,7 @@ def test_http_cancellation_with_real_postgres() -> None:
 
                 assert ticket is not None
                 assert ticket.status == "cancelled"
+                assert ticket.status is TicketStatus.CANCELLED
                 assert ticket.cancelled_at is not None
                 assert operation_count == 1
 
@@ -1410,7 +1457,9 @@ def test_cleanup_releases_stale_prepared_registration() -> None:
                 )
 
                 assert ticket.status == "failed"
+                assert ticket.status is TicketStatus.FAILED
                 assert operation.status == "failed"
+                assert operation.status is OperationStatus.FAILED
                 assert operation.error_code == "stale_prepared"
 
             reserved_again, _, _ = await try_reserve(
@@ -1465,7 +1514,9 @@ def test_cleanup_closes_stale_prepared_cancellation() -> None:
                 )
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "failed"
+                assert operation.status is OperationStatus.FAILED
                 assert operation.error_code == "stale_prepared"
 
             assert await store.prepare_cancellation(
@@ -1515,7 +1566,9 @@ def test_cleanup_does_not_touch_in_flight() -> None:
                 )
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "in_flight"
+                assert operation.status is OperationStatus.IN_FLIGHT
 
         finally:
             await engine.dispose()
@@ -1566,7 +1619,9 @@ def test_cleanup_does_not_touch_unknown() -> None:
                 )
 
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert operation.status == "unknown"
+                assert operation.status is OperationStatus.UNKNOWN
 
         finally:
             await engine.dispose()
@@ -1679,6 +1734,9 @@ def test_postgres_outbox_mark_sent() -> None:
 
                 assert sent_event.status == "sent"
                 assert other_event.status == "pending"
+
+                assert sent_event.status is OutboxStatus.SENT
+                assert other_event.status is OutboxStatus.PENDING
 
         finally:
             await engine.dispose()
@@ -2137,10 +2195,12 @@ def test_postgres_expired_success_releases_key_but_keeps_ticket_and_outbox() -> 
 
                 assert operation is not None
                 assert operation.status == "success"
+                assert operation.status is OperationStatus.SUCCESS
                 assert operation.idempotency_key is None
 
                 assert ticket is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert outbox_count == 1
 
         finally:
@@ -2231,11 +2291,154 @@ def test_postgres_custom_idempotency_ttl_48_hours() -> None:
 
                 assert operation is not None
                 assert operation.status == "success"
+                assert operation.status is OperationStatus.SUCCESS
                 assert operation.idempotency_key is None
 
                 assert ticket is not None
                 assert ticket.status == "active"
+                assert ticket.status is TicketStatus.ACTIVE
                 assert outbox_count == 1
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_sync_status_round_trip() -> None:
+
+    async def scenario() -> None:
+        engine, factory, _ = await prepare_database()
+
+        try:
+            now = datetime.now(UTC)
+
+            async with factory() as session:
+                repository = PostgresSyncStateRepository(session)
+
+                statement = (
+                    insert(SyncState)
+                    .values(
+                        id=1,
+                        sync_status=SyncStatus.NEVER_RUN,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[SyncState.id],
+                        set_={
+                            "sync_status": SyncStatus.NEVER_RUN,
+                            "updated_at": now,
+                        },
+                    )
+                )
+
+                await session.execute(statement)
+
+                query = select(SyncState.sync_status).where(SyncState.id == 1)
+
+                assert await session.scalar(query) is SyncStatus.NEVER_RUN
+
+                lease = await repository.try_start(
+                    now=now,
+                    stale_before=now - timedelta(minutes=5),
+                )
+
+                assert lease is not None
+                assert await session.scalar(query) is SyncStatus.RUNNING
+
+                assert await repository.finish_success(
+                    lease=lease,
+                    now=now,
+                    newest_changed_at=None,
+                )
+
+                assert await session.scalar(query) is SyncStatus.SUCCESS
+
+                lease = await repository.try_start(
+                    now=now,
+                    stale_before=now - timedelta(minutes=5),
+                )
+
+                assert lease is not None
+
+                assert await repository.finish_failure(
+                    lease=lease,
+                    now=now,
+                    error="Test synchronization error",
+                )
+
+                assert await session.scalar(query) is SyncStatus.FAILED
+
+                await session.rollback()
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_outbox_unknown_event_type() -> None:
+    async def scenario() -> None:
+        engine, factory, _ = await prepare_database()
+
+        try:
+            event_id = uuid4()
+
+            async with factory() as session:
+                session.add(
+                    Outbox(
+                        id=event_id,
+                        event_type="unknown_event",
+                        payload={},
+                        status=OutboxStatus.PENDING,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+
+                await session.flush()
+                session.expunge_all()
+
+                outbox_event = await session.get(Outbox, event_id)
+
+                assert outbox_event is not None
+                assert outbox_event.event_type == "unknown_event"
+                assert type(outbox_event.event_type) is str
+                assert outbox_event.status is OutboxStatus.PENDING
+
+                await session.rollback()
+
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_event_status_round_trip() -> None:
+
+    async def scenario() -> None:
+        engine, factory, event_id = await prepare_database()
+
+        try:
+            async with factory() as session:
+                for value, expected in (
+                    ("new", EventStatus.NEW),
+                    ("published", EventStatus.PUBLISHED),
+                    ("finished", EventStatus("finished")),
+                    ("registration_closed", EventStatus("registration_closed")),
+                    ("future_status", "future_status"),
+                ):
+                    await session.execute(
+                        update(Event).where(Event.id == event_id).values(status=value)
+                    )
+
+                    actual = await session.scalar(
+                        select(Event.status).where(Event.id == event_id)
+                    )
+
+                    assert actual == expected
+                    assert type(actual) is type(expected)
+
+                await session.rollback()
 
         finally:
             await engine.dispose()

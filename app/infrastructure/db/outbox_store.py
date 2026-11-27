@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.enums import OutboxStatus
 from app.infrastructure.db.models import Outbox
 
 
@@ -17,7 +18,7 @@ class PostgresOutboxStore:
         async with self._session_factory() as session:
             statement = (
                 select(Outbox)
-                .where(Outbox.status == "pending")
+                .where(Outbox.status == OutboxStatus.PENDING)
                 .order_by(Outbox.created_at, Outbox.id)
                 .limit(limit)
             )
@@ -31,8 +32,8 @@ class PostgresOutboxStore:
                 update(Outbox)
                 .where(
                     Outbox.id == event_id,
-                    Outbox.status == "pending",
+                    Outbox.status == OutboxStatus.PENDING,
                 )
-                .values(status="sent")
+                .values(status=OutboxStatus.SENT)
             )
             await session.execute(statement)
