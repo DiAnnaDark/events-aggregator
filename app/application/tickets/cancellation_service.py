@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import httpx
 
 from app.application.tickets.state import TicketCancellationSnapshot
+from app.core.enums import TicketStatus
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +141,10 @@ class TicketCancellationService:
         if ticket is None:
             raise TicketNotFound("Ticket not found")
 
-        if ticket.status == "cancelled":
+        if ticket.status == TicketStatus.CANCELLED:
             return
 
-        if ticket.status != "active":
+        if ticket.status != TicketStatus.ACTIVE:
             raise CancellationUnavailable("Ticket is not available for cancellation")
 
         if ticket.provider_ticket_id is None:

@@ -13,6 +13,7 @@ from app.application.events.schemas import (
     EventSeats,
 )
 from app.application.events.seats_service import SeatsService
+from app.core.enums import EventStatus
 from app.infrastructure.db.event_read_repository import (
     PostgresEventReadRepository,
 )
@@ -133,7 +134,7 @@ async def get_event_seats(
             detail="Event not found",
         )
 
-    if event.status != "published":
+    if event.status != EventStatus.PUBLISHED:
         raise HTTPException(
             status_code=409,
             detail="Event is not published",

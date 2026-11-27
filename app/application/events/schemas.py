@@ -2,6 +2,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel
 
+from app.application.events.status import EventStatusValue
+
 
 class PlaceSummary(BaseModel):
     id: UUID
@@ -20,7 +22,7 @@ class EventSummary(BaseModel):
     place: PlaceSummary
     event_time: AwareDatetime
     registration_deadline: AwareDatetime
-    status: str
+    status: EventStatusValue
     number_of_visitors: int
 
 

@@ -8,6 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.tickets.schemas import TicketCreate
 from app.application.tickets.state import TicketCancellationSnapshot
+from app.core.enums import (
+    OperationStatus,
+    OperationType,
+    OutboxEventType,
+    OutboxStatus,
+    TicketStatus,
+)
 from app.infrastructure.db.models import Event, Outbox, Ticket, TicketOperation
 
 
@@ -31,8 +38,8 @@ class PostgresTicketRepository:
             update(TicketOperation)
             .where(
                 TicketOperation.idempotency_key == key,
-                TicketOperation.operation_type == "register",
-                TicketOperation.status == "success",
+                TicketOperation.operation_type == OperationType.REGISTER,
+                TicketOperation.status == OperationStatus.SUCCESS,
                 TicketOperation.finished_at.is_not(None),
                 TicketOperation.finished_at <= expired_before,
             )
@@ -43,7 +50,7 @@ class PostgresTicketRepository:
 
         statement = select(TicketOperation).where(
             TicketOperation.idempotency_key == key,
-            TicketOperation.operation_type == "register",
+            TicketOperation.operation_type == OperationType.REGISTER,
         )
 
         return await self._session.scalar(statement)
@@ -67,7 +74,7 @@ class PostgresTicketRepository:
                 last_name=request.last_name,
                 email=str(request.email),
                 seat=request.seat,
-                status="pending",
+                status=TicketStatus.PENDING,
                 created_at=now,
                 registered_at=None,
                 updated_at=now,
@@ -91,10 +98,10 @@ class PostgresTicketRepository:
         operation_insert = insert(TicketOperation).values(
             id=operation_id,
             registration_id=registration_id,
-            operation_type="register",
+            operation_type=OperationType.REGISTER,
             idempotency_key=request.idempotency_key,
             request_fingerprint=request_fingerprint,
-            status="prepared",
+            status=OperationStatus.PREPARED,
             provider_http_status=None,
             error_code=None,
             created_at=now,
@@ -117,7 +124,7 @@ class PostgresTicketRepository:
             select(Ticket.id)
             .where(
                 Ticket.id == registration_id,
-                Ticket.status == "pending",
+                Ticket.status == TicketStatus.PENDING,
             )
             .exists()
         )
@@ -127,12 +134,12 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == registration_id,
-                TicketOperation.operation_type == "register",
-                TicketOperation.status == "prepared",
+                TicketOperation.operation_type == OperationType.REGISTER,
+                TicketOperation.status == OperationStatus.PREPARED,
                 pending_ticket,
             )
             .values(
-                status="in_flight",
+                status=OperationStatus.IN_FLIGHT,
                 updated_at=now,
             )
             .returning(TicketOperation.id)
@@ -155,11 +162,11 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == registration_id,
-                TicketOperation.operation_type == "register",
-                TicketOperation.status == "in_flight",
+                TicketOperation.operation_type == OperationType.REGISTER,
+                TicketOperation.status == OperationStatus.IN_FLIGHT,
             )
             .values(
-                status="success",
+                status=OperationStatus.SUCCESS,
                 provider_http_status=201,
                 error_code=None,
                 updated_at=now,
@@ -177,11 +184,11 @@ class PostgresTicketRepository:
             update(Ticket)
             .where(
                 Ticket.id == registration_id,
-                Ticket.status == "pending",
+                Ticket.status == TicketStatus.PENDING,
             )
             .values(
                 provider_ticket_id=provider_ticket_id,
-                status="active",
+                status=TicketStatus.ACTIVE,
                 registered_at=now,
                 updated_at=now,
             )
@@ -209,14 +216,14 @@ class PostgresTicketRepository:
         self._session.add(
             Outbox(
                 id=uuid4(),
-                event_type="ticket_purchased",
+                event_type=OutboxEventType.TICKET_PURCHASED,
                 payload={
                     "ticket_id": str(registration_id),
                     "message": (
                         f"Вы успешно зарегистрированы на мероприятие «{event_name}»."
                     ),
                 },
-                status="pending",
+                status=OutboxStatus.PENDING,
                 created_at=now,
             )
         )
@@ -236,7 +243,9 @@ class PostgresTicketRepository:
         if outcome not in ("failed", "unknown"):
             raise ValueError("Unsupported registration outcome")
 
-        ticket_status = "failed" if outcome == "failed" else "uncertain"
+        ticket_status = (
+            TicketStatus.FAILED if outcome == "failed" else TicketStatus.UNCERTAIN
+        )
 
         finished_at = now if outcome == "failed" else None
 
@@ -245,11 +254,11 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == registration_id,
-                TicketOperation.operation_type == "register",
-                TicketOperation.status == "in_flight",
+                TicketOperation.operation_type == OperationType.REGISTER,
+                TicketOperation.status == OperationStatus.IN_FLIGHT,
             )
             .values(
-                status=outcome,
+                status=OperationStatus(outcome),
                 provider_http_status=provider_http_status,
                 error_code=error_code,
                 updated_at=now,
@@ -270,7 +279,7 @@ class PostgresTicketRepository:
             update(Ticket)
             .where(
                 Ticket.id == registration_id,
-                Ticket.status == "pending",
+                Ticket.status == TicketStatus.PENDING,
             )
             .values(
                 status=ticket_status,
@@ -299,12 +308,12 @@ class PostgresTicketRepository:
             update(TicketOperation)
             .where(
                 TicketOperation.id == operation_id,
-                TicketOperation.operation_type == "register",
-                TicketOperation.status == "prepared",
+                TicketOperation.operation_type == OperationType.REGISTER,
+                TicketOperation.status == OperationStatus.PREPARED,
                 TicketOperation.updated_at < stale_before,
             )
             .values(
-                status="failed",
+                status=OperationStatus.FAILED,
                 error_code="stale_prepared",
                 updated_at=now,
                 finished_at=now,
@@ -323,10 +332,10 @@ class PostgresTicketRepository:
             update(Ticket)
             .where(
                 Ticket.id == registration_id,
-                Ticket.status == "pending",
+                Ticket.status == TicketStatus.PENDING,
             )
             .values(
-                status="failed",
+                status=TicketStatus.FAILED,
                 updated_at=now,
             )
             .returning(Ticket.id)
@@ -383,7 +392,7 @@ class PostgresTicketRepository:
             .join(Event, Event.id == Ticket.event_id)
             .where(
                 Ticket.id == ticket_id,
-                Ticket.status == "active",
+                Ticket.status == TicketStatus.ACTIVE,
                 Ticket.provider_ticket_id.is_not(None),
                 Event.event_time > now,
             )
@@ -400,10 +409,10 @@ class PostgresTicketRepository:
             .values(
                 id=operation_id,
                 registration_id=ticket_id,
-                operation_type="cancel",
+                operation_type=OperationType.CANCEL,
                 idempotency_key=None,
                 request_fingerprint=request_fingerprint,
-                status="prepared",
+                status=OperationStatus.PREPARED,
                 provider_http_status=None,
                 error_code=None,
                 created_at=now,
@@ -435,7 +444,7 @@ class PostgresTicketRepository:
             .join(Event, Event.id == Ticket.event_id)
             .where(
                 Ticket.id == ticket_id,
-                Ticket.status == "active",
+                Ticket.status == TicketStatus.ACTIVE,
                 Ticket.provider_ticket_id.is_not(None),
                 Event.event_time > now,
             )
@@ -447,12 +456,12 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == ticket_id,
-                TicketOperation.operation_type == "cancel",
-                TicketOperation.status == "prepared",
+                TicketOperation.operation_type == OperationType.CANCEL,
+                TicketOperation.status == OperationStatus.PREPARED,
                 active_ticket,
             )
             .values(
-                status="in_flight",
+                status=OperationStatus.IN_FLIGHT,
                 updated_at=now,
             )
             .returning(TicketOperation.id)
@@ -474,11 +483,11 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == ticket_id,
-                TicketOperation.operation_type == "cancel",
-                TicketOperation.status == "in_flight",
+                TicketOperation.operation_type == OperationType.CANCEL,
+                TicketOperation.status == OperationStatus.IN_FLIGHT,
             )
             .values(
-                status="success",
+                status=OperationStatus.SUCCESS,
                 provider_http_status=200,
                 error_code=None,
                 updated_at=now,
@@ -496,11 +505,11 @@ class PostgresTicketRepository:
             update(Ticket)
             .where(
                 Ticket.id == ticket_id,
-                Ticket.status == "active",
+                Ticket.status == TicketStatus.ACTIVE,
                 Ticket.provider_ticket_id.is_not(None),
             )
             .values(
-                status="cancelled",
+                status=TicketStatus.CANCELLED,
                 cancelled_at=now,
                 updated_at=now,
             )
@@ -536,11 +545,11 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == ticket_id,
-                TicketOperation.operation_type == "cancel",
-                TicketOperation.status == "in_flight",
+                TicketOperation.operation_type == OperationType.CANCEL,
+                TicketOperation.status == OperationStatus.IN_FLIGHT,
             )
             .values(
-                status=outcome,
+                status=OperationStatus(outcome),
                 provider_http_status=provider_http_status,
                 error_code=error_code,
                 updated_at=now,
@@ -565,11 +574,11 @@ class PostgresTicketRepository:
             .where(
                 TicketOperation.id == operation_id,
                 TicketOperation.registration_id == ticket_id,
-                TicketOperation.operation_type == "cancel",
-                TicketOperation.status == "prepared",
+                TicketOperation.operation_type == OperationType.CANCEL,
+                TicketOperation.status == OperationStatus.PREPARED,
             )
             .values(
-                status="failed",
+                status=OperationStatus.FAILED,
                 error_code="cancellation_not_started",
                 updated_at=now,
                 finished_at=now,
@@ -592,12 +601,12 @@ class PostgresTicketRepository:
             update(TicketOperation)
             .where(
                 TicketOperation.id == operation_id,
-                TicketOperation.operation_type == "cancel",
-                TicketOperation.status == "prepared",
+                TicketOperation.operation_type == OperationType.CANCEL,
+                TicketOperation.status == OperationStatus.PREPARED,
                 TicketOperation.updated_at < stale_before,
             )
             .values(
-                status="failed",
+                status=OperationStatus.FAILED,
                 error_code="stale_prepared",
                 updated_at=now,
                 finished_at=now,
@@ -625,9 +634,11 @@ class PostgresTicketRepository:
                 TicketOperation.operation_type,
             )
             .where(
-                TicketOperation.status == "prepared",
+                TicketOperation.status == OperationStatus.PREPARED,
                 TicketOperation.updated_at < stale_before,
-                TicketOperation.operation_type.in_(("register", "cancel")),
+                TicketOperation.operation_type.in_(
+                    (OperationType.REGISTER, OperationType.CANCEL)
+                ),
             )
             .order_by(
                 TicketOperation.updated_at,
@@ -645,7 +656,7 @@ class PostgresTicketRepository:
         expired = 0
 
         for operation_id, operation_type in result.all():
-            if operation_type == "register":
+            if operation_type == OperationType.REGISTER:
                 completed = await self.expire_prepared_registration(
                     operation_id=operation_id,
                     stale_before=stale_before,

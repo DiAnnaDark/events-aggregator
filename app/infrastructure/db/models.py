@@ -14,7 +14,21 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.enums import (
+    EventStatus,
+    OperationStatus,
+    OperationType,
+    OutboxEventType,
+    OutboxStatus,
+    SyncStatus,
+    TicketStatus,
+)
 from app.infrastructure.db.base import Base
+from app.infrastructure.db.enum_types import (
+    EnumText,
+    EventStatusText,
+    OutboxEventTypeText,
+)
 
 
 class Place(Base):
@@ -68,7 +82,7 @@ class Event(Base):
         nullable=False,
     )
 
-    status: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[EventStatus | str] = mapped_column(EventStatusText(), nullable=False)
 
     number_of_visitors: Mapped[int] = mapped_column(
         Integer,
@@ -128,7 +142,7 @@ class Ticket(Base):
     last_name: Mapped[str] = mapped_column(Text, nullable=False)
     email: Mapped[str] = mapped_column(Text, nullable=False)
     seat: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[TicketStatus] = mapped_column(EnumText(TicketStatus), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -174,8 +188,8 @@ class TicketOperation(Base):
         nullable=False,
     )
 
-    operation_type: Mapped[str] = mapped_column(
-        Text,
+    operation_type: Mapped[OperationType] = mapped_column(
+        EnumText(OperationType),
         nullable=False,
     )
 
@@ -190,8 +204,8 @@ class TicketOperation(Base):
         nullable=False,
     )
 
-    status: Mapped[str] = mapped_column(
-        Text,
+    status: Mapped[OperationStatus] = mapped_column(
+        EnumText(OperationStatus),
         nullable=False,
     )
 
@@ -250,8 +264,8 @@ class SyncState(Base):
         nullable=True,
     )
 
-    sync_status: Mapped[str] = mapped_column(
-        Text,
+    sync_status: Mapped[SyncStatus] = mapped_column(
+        EnumText(SyncStatus),
         nullable=False,
     )
 
@@ -294,8 +308,8 @@ class Outbox(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
 
-    event_type: Mapped[str] = mapped_column(
-        Text,
+    event_type: Mapped[OutboxEventType | str] = mapped_column(
+        OutboxEventTypeText(),
         nullable=False,
     )
 
@@ -304,8 +318,8 @@ class Outbox(Base):
         nullable=False,
     )
 
-    status: Mapped[str] = mapped_column(
-        Text,
+    status: Mapped[OutboxStatus] = mapped_column(
+        EnumText(OutboxStatus),
         nullable=False,
         server_default="pending",
     )

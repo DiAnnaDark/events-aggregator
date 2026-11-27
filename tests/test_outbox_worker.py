@@ -258,3 +258,43 @@ def test_worker_retries_when_mark_sent_fails() -> None:
         ]
 
     asyncio.run(scenario())
+
+
+def test_worker_skips_unknown_event_and_processes_next() -> None:
+    async def scenario() -> None:
+        unknown_event = SimpleNamespace(
+            id=uuid4(),
+            event_type="unknown_event",
+            payload={},
+        )
+
+        valid_event = SimpleNamespace(
+            id=uuid4(),
+            event_type="ticket_purchased",
+            payload={
+                "message": "Билет успешно куплен",
+                "ticket_id": str(uuid4()),
+            },
+        )
+
+        store = SimpleNamespace(
+            get_pending=AsyncMock(return_value=[unknown_event, valid_event]),
+            mark_sent=AsyncMock(),
+        )
+
+        sender = SimpleNamespace(send=AsyncMock())
+        worker = OutboxWorker(store=store, sender=sender)
+
+        result = await worker.run_once()
+
+        assert result == 2
+
+        sender.send.assert_awaited_once_with(
+            message=valid_event.payload["message"],
+            reference_id=valid_event.payload["ticket_id"],
+            idempotency_key=str(valid_event.id),
+        )
+
+        store.mark_sent.assert_awaited_once_with(valid_event.id)
+
+    asyncio.run(scenario())

@@ -4,6 +4,7 @@ from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.sync.state import SyncLease
+from app.core.enums import SyncStatus
 from app.infrastructure.db.models import SyncState
 
 
@@ -22,12 +23,12 @@ class PostgresSyncStateRepository:
             .where(
                 SyncState.id == 1,
                 or_(
-                    SyncState.sync_status != "running",
+                    SyncState.sync_status != SyncStatus.RUNNING,
                     SyncState.updated_at < stale_before,
                 ),
             )
             .values(
-                sync_status="running",
+                sync_status=SyncStatus.RUNNING,
                 started_at=now,
                 finished_at=None,
                 last_error=None,
@@ -60,7 +61,7 @@ class PostgresSyncStateRepository:
             update(SyncState)
             .where(
                 SyncState.id == 1,
-                SyncState.sync_status == "running",
+                SyncState.sync_status == SyncStatus.RUNNING,
                 SyncState.started_at == lease.started_at,
             )
             .values(updated_at=now)
@@ -78,7 +79,7 @@ class PostgresSyncStateRepository:
         newest_changed_at: datetime | None,
     ) -> bool:
         values = {
-            "sync_status": "success",
+            "sync_status": SyncStatus.SUCCESS,
             "last_sync_time": now,
             "finished_at": now,
             "last_error": None,
@@ -102,7 +103,7 @@ class PostgresSyncStateRepository:
             update(SyncState)
             .where(
                 SyncState.id == 1,
-                SyncState.sync_status == "running",
+                SyncState.sync_status == SyncStatus.RUNNING,
                 SyncState.started_at == lease.started_at,
             )
             .values(**values)
@@ -123,11 +124,11 @@ class PostgresSyncStateRepository:
             update(SyncState)
             .where(
                 SyncState.id == 1,
-                SyncState.sync_status == "running",
+                SyncState.sync_status == SyncStatus.RUNNING,
                 SyncState.started_at == lease.started_at,
             )
             .values(
-                sync_status="failed",
+                sync_status=SyncStatus.FAILED,
                 finished_at=now,
                 last_error=error[:1000],
                 updated_at=now,

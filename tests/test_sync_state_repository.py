@@ -6,6 +6,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.sync.state import SyncLease
+from app.core.enums import SyncStatus
 from app.infrastructure.db.sync_state_repository import (
     PostgresSyncStateRepository,
 )
@@ -42,6 +43,9 @@ def test_try_start_returns_lease() -> None:
     assert "UPDATE sync_state SET" in sql
     assert "sync_state.updated_at <" in sql
     assert "RETURNING sync_state.started_at" in sql
+
+    params = statement.compile(dialect=postgresql.dialect()).params
+    assert params["sync_status"] is SyncStatus.RUNNING
 
 
 def test_try_start_rejects_concurrent_run() -> None:

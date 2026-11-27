@@ -2,6 +2,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, Field
 
+from app.application.events.status import EventStatusValue
+
 
 class PlaceSnapshot(BaseModel):
     id: UUID
@@ -19,7 +21,7 @@ class EventSnapshot(BaseModel):
     place: PlaceSnapshot
     event_time: AwareDatetime
     registration_deadline: AwareDatetime
-    status: str
+    status: EventStatusValue
     number_of_visitors: int = Field(ge=0)
     changed_at: AwareDatetime
     created_at: AwareDatetime
